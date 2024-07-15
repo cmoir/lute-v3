@@ -116,7 +116,7 @@ def _start(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start lute.")
     parser.add_argument(
-        "--port", type=int, default=5000, help="Port number (default: 5000)"
+        "--port", type=int, default=5001, help="Port number (default: 5001)"
     )
     parser.add_argument(
         "--config",

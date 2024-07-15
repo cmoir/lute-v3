@@ -42,7 +42,8 @@ class SpaceDelimitedParser(AbstractParser):
         """Return default value for lang.word_characters."""
 
         # Unicode categories reference: https://www.compart.com/en/unicode/category
-        categories = set(["Cf", "Ll", "Lm", "Lo", "Lt", "Lu", "Mc", "Mn", "Sk"])
+        categories = set(
+            ["Cf", "Ll", "Lm", "Lo", "Lt", "Lu", "Mc", "Mn", "Sk"])
 
         # There are more than 130,000 characters across all these categories.
         # Expressing this a single character at a time, mostly using unicode
@@ -175,7 +176,8 @@ class SpaceDelimitedParser(AbstractParser):
         E.g. search for r'cat' in "there is a CAT and a Cat" returns:
         [['CAT', 11], ['Cat', 21]]
         """
-        compiled = SpaceDelimitedParser.compile_re_pattern(pattern, flags=re.IGNORECASE)
+        compiled = SpaceDelimitedParser.compile_re_pattern(
+            pattern, flags=re.IGNORECASE)
         matches = compiled.finditer(subject)
         result = [[match.group(), match.start()] for match in matches]
         return result
@@ -268,3 +270,67 @@ class TurkishParser(SpaceDelimitedParser):
         for caps, lower in {"İ": "i", "I": "ı"}.items():
             text = text.replace(caps, lower)
         return text.lower()
+
+
+class KoreanParser(SpaceDelimitedParser):
+    """
+    A parser for Korean that ignores common ending markers like topic markers (은/는) and subject markers (이/가).
+    """
+
+    def preg_match_capture(self, pattern, subject):
+
+        """
+        Return the matched text and their start positions in the subject.
+
+        E.g. search for r'cat' in "there is a CAT and a Cat" returns:
+        [['CAT', 11], ['Cat', 21]]
+        """
+        # List of Korean particles to ignore
+        particles = {'은', '는', '이', '가', '을', '에', '을', '를', '에서', '으로', '로', '부터', '까지', '들', '의', '와', '하고' }
+        new_subject_parts = []
+        #print(f"Original subject: {subject}")
+
+        word_index = 0  # Track the current word index
+        removed_particles = {}  # Dictionary to store indices of removed particles
+
+        for word in subject.split():
+            original_word = word
+            # If the word ends with a particle, remove it
+            if len(word) > 1 and word[-1] in particles:
+               # print(f"Removing particle: {word[-1]} from {word}")
+                word = word[:-1]
+                # Store the length of removed particles
+                removed_particles[word_index] = len(original_word) - len(word)
+            
+            new_subject_parts.append(word)
+            word_index += 1
+
+        # Join words into a new subject string with preserved spaces
+        new_subject = ' '.join(new_subject_parts)
+        #check if the original subject starts with a space, if so add it to the new subject
+        if subject.startswith(' '):
+            new_subject = ' ' + new_subject
+        #print(f"New subject: {new_subject}")
+
+        # Compile the pattern and perform the match on the cleaned subject
+        compiled = SpaceDelimitedParser.compile_re_pattern(
+            pattern, flags=re.IGNORECASE)
+        matches = compiled.finditer(new_subject)
+        matchesOrignal = compiled.finditer(subject)
+
+        # Adjust match positions based on modified subject and removed particles
+        result = []
+        for match in matches:
+            # Get the original start POSTION of the matchesOrignal
+            matchOrigon = next(matchesOrignal)         
+
+            
+            result.append([match.group(), matchOrigon.start()])
+            
+        #print(f"Result: {result}")
+
+        return result
+
+    @classmethod
+    def name(cls):
+        return "Korean"
