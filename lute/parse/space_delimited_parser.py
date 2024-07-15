@@ -286,24 +286,22 @@ class KoreanParser(SpaceDelimitedParser):
         [['CAT', 11], ['Cat', 21]]
         """
         # List of Korean particles to ignore
-        particles = {'은', '는', '이', '가', '을', '에', '을', '를', '에서', '으로', '로', '부터', '까지', '들', '의', '와', '하고' }
+        #particles = {'은', '는', '이', '가', '을', '에', '을', '를', '에서', '으로', '로', '부터', '까지', '들', '의', '와', '하고' }
+        #one letter particles
+        particlesOne = {'은', '는', '이', '가', '을', '를', '에', '로', '들', '의', '와'}
+        particlesTwo = {'으로', '부터', '까지', '하고', '에서'}
         new_subject_parts = []
         #print(f"Original subject: {subject}")
-
-        word_index = 0  # Track the current word index
-        removed_particles = {}  # Dictionary to store indices of removed particles
-
         for word in subject.split():
-            original_word = word
             # If the word ends with a particle, remove it
-            if len(word) > 1 and word[-1] in particles:
+            if len(word) > 2 and word[-2:] in particlesTwo:
                # print(f"Removing particle: {word[-1]} from {word}")
+                word = word[:-2]      
+            elif len(word) > 1 and word[-1:] in particlesOne:
+                #print(f"Removing particle: {word[-2:]} from {word}")
                 word = word[:-1]
-                # Store the length of removed particles
-                removed_particles[word_index] = len(original_word) - len(word)
-            
             new_subject_parts.append(word)
-            word_index += 1
+
 
         # Join words into a new subject string with preserved spaces
         new_subject = ' '.join(new_subject_parts)
