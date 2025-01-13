@@ -290,7 +290,7 @@ class KoreanParser(SpaceDelimitedParser):
         #one letter particles
         particlesOne = {'은', '는', '이', '가', '을', '를', '에', '로', '들', '의', '와', '과','도'}
         particlesTwo = {'으로', '부터', '까지', '하고', '에서', '에는'}
-        wordsToExclude = {'아이','나이','데이', '같이', '떡볶이' '제이', '떡볶이', '케이'}
+        wordsToExclude = {'아이','나이','데이', '같이', '떡볶이' '제이', '떡볶이', '케이','회의'}
         new_subject_parts = []
         #print(f"Original subject: {subject}")
         for word in subject.split():
