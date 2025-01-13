@@ -25,17 +25,23 @@ from sqlalchemy.pool import Pool
 from lute.config.app_config import AppConfig
 from lute.db import db
 from lute.db.setup.main import setup_db
+from lute.db.management import add_default_user_settings
 from lute.db.data_cleanup import clean_data
-import lute.backup.service as backupservice
-import lute.db.demo
+from lute.backup.service import Service as BackupService
+from lute.db.demo import Service as DemoService
 import lute.utils.formutils
 
 from lute.parse.registry import init_parser_plugins, supported_parsers
 
 from lute.models.book import Book
 from lute.models.language import Language
-from lute.models.setting import BackupSettings, UserSetting
-from lute.book.stats import refresh_stats, mark_stale
+from lute.settings.current import (
+    refresh_global_settings,
+    current_settings,
+    current_hotkeys,
+)
+from lute.models.repositories import UserSettingRepository
+from lute.book.stats import Service as StatsService
 
 from lute.book.routes import bp as book_bp
 from lute.bookmarks.routes import bp as bookmarks_bp
@@ -111,7 +117,8 @@ def _add_base_routes(app, app_config):
         """
         Inject backup settings into the all templates for the menu bar.
         """
-        bs = BackupSettings.get_backup_settings()
+        us_repo = UserSettingRepository(db.session)
+        bs = us_repo.get_backup_settings()
         have_languages = len(db.session.query(Language).all()) > 0
         ret = {
             "have_languages": have_languages,
@@ -119,65 +126,71 @@ def _add_base_routes(app, app_config):
             "backup_directory": bs.backup_dir,
             "backup_last_display_date": bs.last_backup_display_date,
             "backup_time_since": bs.time_since_last_backup,
-            "user_settings": json.dumps(UserSetting.all_settings()),
+            "user_settings": json.dumps(current_settings),
+            "user_hotkeys": json.dumps(current_hotkeys),
         }
         return ret
 
     @app.route("/")
     def index():
-        is_production = not lute.db.demo.contains_demo_data()
-        bkp_settings = BackupSettings.get_backup_settings()
+        demosvc = DemoService(db.session)
+        is_production = not demosvc.contains_demo_data()
+        us_repo = UserSettingRepository(db.session)
+        bkp_settings = us_repo.get_backup_settings()
 
         have_books = len(db.session.query(Book).all()) > 0
         have_languages = len(db.session.query(Language).all()) > 0
-        language_choices = lute.utils.formutils.language_choices("(all languages)")
-        current_language_id = lute.utils.formutils.valid_current_language_id()
+        language_choices = lute.utils.formutils.language_choices(
+            db.session, "(all languages)"
+        )
+        current_language_id = lute.utils.formutils.valid_current_language_id(db.session)
 
-        should_run_auto_backup = backupservice.should_run_auto_backup(bkp_settings)
+        bs = BackupService(db.session)
+        should_run_auto_backup = bs.should_run_auto_backup(bkp_settings)
         # Only back up if we have books, otherwise the backup is
         # kicked off when the user empties the demo database.
         if is_production and have_books and should_run_auto_backup:
             return redirect("/backup/backup", 302)
 
-        refresh_stats()
-        warning_msg = backupservice.backup_warning(bkp_settings)
+        warning_msg = bs.backup_warning(bkp_settings)
         backup_show_warning = (
             bkp_settings.backup_warn
             and bkp_settings.backup_enabled
             and warning_msg != ""
         )
 
-        return render_template(
-            "index.html",
-            hide_homelink=True,
-            dbname=app_config.dbname,
-            datapath=app_config.datapath,
-            tutorial_book_id=lute.db.demo.tutorial_book_id(),
-            have_books=have_books,
-            have_languages=have_languages,
-            language_choices=language_choices,
-            current_language_id=current_language_id,
-            is_production_data=is_production,
-            # Backup stats
-            backup_show_warning=backup_show_warning,
-            backup_warning_msg=warning_msg,
+        demosvc = DemoService(db.session)
+        response = make_response(
+            render_template(
+                "index.html",
+                hide_homelink=True,
+                dbname=app_config.dbname,
+                datapath=app_config.datapath,
+                tutorial_book_id=demosvc.tutorial_book_id(),
+                have_books=have_books,
+                have_languages=have_languages,
+                language_choices=language_choices,
+                current_language_id=current_language_id,
+                is_production_data=is_production,
+                backup_show_warning=backup_show_warning,
+                backup_warning_msg=warning_msg,
+            )
         )
+        return response
 
     @app.route("/refresh_all_stats")
     def refresh_all_stats():
         books_to_update = db.session.query(Book).filter(Book.archived == 0).all()
-
+        svc = StatsService(db.session)
         for book in books_to_update:
-            mark_stale(book)
-
-        refresh_stats()
-
+            svc.mark_stale(book)
         return redirect("/", 302)
 
     @app.route("/wipe_database")
     def wipe_db():
-        if lute.db.demo.contains_demo_data():
-            lute.db.demo.delete_demo_data()
+        demosvc = DemoService(db.session)
+        if demosvc.contains_demo_data():
+            demosvc.delete_demo_data()
             msg = """
             The database has been wiped clean.  Have fun! <br /><br />
             <i>(Lute has automatically enabled backups --
@@ -188,8 +201,9 @@ def _add_base_routes(app, app_config):
 
     @app.route("/remove_demo_flag")
     def remove_demo():
-        if lute.db.demo.contains_demo_data():
-            lute.db.demo.remove_flag()
+        demosvc = DemoService(db.session)
+        if demosvc.contains_demo_data():
+            demosvc.remove_flag()
             msg = """
             Demo mode deactivated. Have fun! <br /><br />
             <i>(Lute has automatically enabled backups --
@@ -208,10 +222,6 @@ def _add_base_routes(app, app_config):
             database=ac.dbfilename,
             is_docker=ac.is_docker,
         )
-
-    @app.route("/hotkeys")
-    def show_hotkeys():
-        return render_template("hotkeys.html")
 
     @app.route("/info")
     def show_info():
@@ -291,6 +301,11 @@ def _create_app(app_config, extra_config):
         # ref https://flask-sqlalchemy.palletsprojects.com/en/2.x/config/
         # Don't track mods.
         "SQLALCHEMY_TRACK_MODIFICATIONS": False,
+        # Disable CSRF -- this is a local app, and it's highly
+        # unlikely that a malicious site will try to hack anyone's Lute data.
+        # ref https://stackoverflow.com/questions/5207160/
+        #   what-is-a-csrf-token-what-is-its-importance-and-how-does-it-work
+        "WTF_CSRF_ENABLED": False,
     }
 
     final_config = {**config, **extra_config}
@@ -304,12 +319,12 @@ def _create_app(app_config, extra_config):
     @listens_for(Pool, "connect")
     def _pragmas_on_connect(dbapi_con, con_record):  # pylint: disable=unused-argument
         dbapi_con.execute("pragma recursive_triggers = on;")
+        dbapi_con.execute("pragma foreign_keys = on;")
 
     with app.app_context():
         db.create_all()
-        UserSetting.load()
-        # TODO valid parsers: do parser check, mark valid as active, invalid as inactive.
-        clean_data()
+        add_default_user_settings(db.session, app_config.default_user_backup_path)
+        refresh_global_settings(db.session)
     app.db = db
 
     _add_base_routes(app, app_config)
@@ -394,6 +409,32 @@ def create_app(
     outfunc("Initializing app.")
     app = _create_app(app_config, extra_config)
 
+    # Plugins are loaded after the app, as they may use settings etc.
     _init_parser_plugins(app_config.plugin_datapath, outfunc)
 
     return app
+
+
+def data_initialization(session, output_func=None):
+    """
+    Any extra data setup.
+
+    TODO: rework data initialization.  The DB setup can be handled
+    outside of the application context, as IMO it's clearer to manage
+    the data separately from the thing that uses the data.  This
+    requires moving from flask-sqlalchemy to plain sqlalchemy.
+    """
+
+    def _null_print(s):  # pylint: disable=unused-argument
+        pass
+
+    outfunc = output_func or _null_print
+
+    demosvc = DemoService(session)
+    if demosvc.should_load_demo_data():
+        outfunc("Loading demo data.")
+        demosvc.load_demo_data()
+
+    # TODO valid parsers: do parser check, mark valid as active, invalid as inactive.
+
+    clean_data(session, outfunc)

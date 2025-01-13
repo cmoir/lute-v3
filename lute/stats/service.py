@@ -4,25 +4,21 @@ Calculating stats.
 
 from datetime import datetime, timedelta
 from sqlalchemy import text
-from lute.db import db
 
 
-def _get_data_per_lang():
+def _get_data_per_lang(session):
     "Return dict of lang name to dict[date_yyyymmdd}: count"
     ret = {}
     sql = """
-    select lang, dt, sum(TxWordCount) as count
+    select lang, dt, sum(WrWordCount) as count
     from (
-      select LgName as lang, strftime('%Y-%m-%d', TxReadDate) as dt, TxWordCount
-      from texts
-      inner join books on BkID = TxBkID
-      inner join languages on LgID = BkLgID
-      where TxWordCount is not null
-      and TxReadDate is not null
+      select LgName as lang, strftime('%Y-%m-%d', WrReadDate) as dt, WrWordCount
+      from wordsread
+      inner join languages on LgID = WrLgID
     ) raw
     group by lang, dt
     """
-    result = db.session.execute(text(sql)).all()
+    result = session.execute(text(sql)).all()
     for row in result:
         langname = row[0]
         if langname not in ret:
@@ -53,9 +49,9 @@ def _charting_data(readbydate):
     return data
 
 
-def get_chart_data():
+def get_chart_data(session):
     "Get data for chart for each language."
-    raw_data = _get_data_per_lang()
+    raw_data = _get_data_per_lang(session)
     chartdata = {}
     for k, v in raw_data.items():
         chartdata[k] = _charting_data(v)
@@ -90,9 +86,9 @@ def _readcount_by_date(readbydate):
     }
 
 
-def get_table_data():
+def get_table_data(session):
     "Wordcounts by lang in time intervals."
-    raw_data = _get_data_per_lang()
+    raw_data = _get_data_per_lang(session)
 
     ret = []
     for langname, readbydate in raw_data.items():

@@ -4,8 +4,7 @@ JapaneseParser tests.
 
 from lute.parse.mecab_parser import JapaneseParser
 from lute.models.term import Term
-from lute.models.setting import UserSetting
-from lute.db import db
+from lute.settings.current import current_settings
 from lute.parse.base import ParsedToken
 
 
@@ -54,6 +53,24 @@ def test_end_of_sentence_stored_in_parsed_tokens(japanese):
     assert_tokens_equals(s, japanese, expected)
 
 
+def test_issue_488_repeat_character_handled(japanese):
+    "Repeat sometimes needs explicit check, can be returned as own word."
+    s = "聞こえる行く先々。少々お待ちください。"
+
+    expected = [
+        ("聞こえる", True),
+        ("行く先", True),
+        ("々", True),
+        ("。", False, True),
+        ("少々", True),
+        ("お待ち", True),
+        ("ください", True),
+        ("。", False, True),
+        ("¶", False, True),
+    ]
+    assert_tokens_equals(s, japanese, expected)
+
+
 def test_readings(app_context):
     """
     Parser returns readings if they add value.
@@ -87,6 +104,5 @@ def test_reading_setting(app_context):
     }
     p = JapaneseParser()
     for k, v in cases.items():
-        UserSetting.set_value("japanese_reading", k)
-        db.session.commit()
+        current_settings["japanese_reading"] = k
         assert p.get_reading("強い") == v, k

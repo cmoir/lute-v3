@@ -8,24 +8,27 @@
 # Official python base image.
 FROM python:3.11-slim-bookworm
 
-WORKDIR /lute
-
-# Install base.
-ENV PIP_ROOT_USER_ACTION=ignore
-RUN pip install lute3
-COPY lute/config/config.yml.docker ./config.yml
-
-# Build arg, defaults to false.
+# Build args
 ARG INSTALL_EVERYTHING=false
 
-COPY docker/Dockerfile_scripts/install_everything.sh ./install_all.sh
-RUN chmod +x ./install_all.sh
+# Install base.
+COPY pyproject.toml .
+COPY README_PyPi.md .
+COPY lute /lute
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV FLIT_ROOT_INSTALL=1
+RUN pip install flit
+RUN flit install --only-deps --deps=production
+COPY lute/config/config.yml.docker /lute/config/config.yml
 
-RUN if [ "$INSTALL_EVERYTHING" = "true" ]; then ./install_all.sh; fi
+COPY docker/Dockerfile_scripts/install_everything.sh /lute/install_all.sh
+RUN chmod +x /lute/install_all.sh
 
-EXPOSE 5000
+RUN if [ "$INSTALL_EVERYTHING" = "true" ]; then /lute/install_all.sh; fi
+
+EXPOSE 5001
 
 # Start script.
-COPY docker/Dockerfile_scripts/start.sh ./start.sh
-RUN chmod +x ./start.sh
+COPY docker/Dockerfile_scripts/start.sh /lute/start.sh
+RUN chmod +x /lute/start.sh
 ENTRYPOINT ["/lute/start.sh"]

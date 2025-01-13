@@ -17,7 +17,7 @@ from tests.utils import add_terms, make_text
 
 @pytest.fixture(name="repo")
 def fixture_repo():
-    return Repository(db)
+    return Repository(db.session)
 
 
 @pytest.fixture(name="hello_term")
@@ -139,6 +139,24 @@ def test_save_uses_existing_TermTags(app_context, repo, hello_term):
     assert_sql_result(sql, ["1; a; HELLO", "2; b; HELLO"], "a used, b created")
 
 
+def test_fix_issue_454_handle_duplicate_tags(app_context, repo, hello_term):
+    "Same new tag added twice should be handled ok."
+    db.session.add(TermTag("a"))
+    db.session.commit()
+
+    sql = """select TgID, TgText, WoText
+    from tags
+    left join wordtags on WtTgID = TgID
+    left join words on WoID = WtWoID
+    order by TgText"""
+    assert_sql_result(sql, ["1; a; None"], "a tag exists")
+
+    hello_term.term_tags = ["a", "b", "b"]
+    repo.add(hello_term)
+    repo.commit()
+    assert_sql_result(sql, ["1; a; HELLO", "2; b; HELLO"], "a used, b created")
+
+
 def test_save_with_no_flash_message(app_context, repo, hello_term):
     "Saving with flash = None removes the flash record."
     hello_term.flash_message = "hi there"
@@ -219,41 +237,183 @@ def test_save_term_image_set_to_blank_removes_record(app_context, repo, hello_te
 ## Saving and parents.
 
 
-def test_save_with_new_parent(app_context, repo, hello_term):
+def create_parent(lang, status=0, translation=None, image=None, tags=None):
+    "Create test parent."
+    p = DBTerm(lang, "parent")
+    p.status = status
+    p.translation = translation
+    p.set_current_image(image)
+    for t in tags or []:
+        p.add_term_tag(TermTag(t))  # Ensure no double-tag added.
+    db.session.add(p)
+    db.session.commit()
+    return p
+
+
+def assert_parent_has(status, translation, img, term_tags):
+    "Assert parent data matches expected."
+    # For some weird reason, query with filter was not returning
+    # a match, so doing a loop to get the parent. Possibly due to aliasing
+    # of lute.models.term.Term to DBTerm.
+    # p = db.session.query(DBTerm).filter(DBTerm.text == "parent").first()
+    parents = [t for t in db.session.query(DBTerm).all() if t.text == "parent"]
+    assert len(parents) == 1, "Sanity check"
+    p = parents[0]
+    assert p.status == status, "status"
+    assert (p.translation or "-") == (translation or "-"), "txn"
+    assert (p.get_current_image() or "-") == (img or "-"), "img"
+    actual_tags = sorted([t.text for t in p.term_tags])
+    assert actual_tags == term_tags, "tags"
+
+
+def test_save_new_child_creates_new_populated_parent(app_context, repo, hello_term):
     """
     Given a Term with parents = [ 'newparent' ],
     new parent DBTerm is created, and is assigned translation and image and tag.
+
+    The child's data is propagated up if needed, to 'fill in' missing parent data.
     """
+    t = hello_term
+    t.parents = ["parent"]
+    t.term_tags = ["a", "b"]
+    repo.add(t)
+    repo.commit()
+
+    assert_parent_has(t.status, t.translation, t.current_image, ["a", "b"])
+
+
+def test_save_new_child_populates_existing_unknown_parent(
+    app_context, repo, english, hello_term
+):
+    "Existing parent with status 0 is bumped to status 1."
+    create_parent(english, status=0)
+
     hello_term.parents = ["parent"]
     hello_term.term_tags = ["a", "b"]
     repo.add(hello_term)
     repo.commit()
-    assert_sql_result("select WoText from words", ["HELLO", "parent"], "parent created")
+
+    t = hello_term
+    assert_parent_has(t.status, t.translation, t.current_image, ["a", "b"])
+
+
+def test_save_new_child_sets_existing_parent_translation_and_image_if_missing(
+    app_context, repo, english, hello_term
+):
+    "Existing new child data is propagated up if needed, to 'fill in' missing parent data."
+    create_parent(english, status=3, translation="something")
+
+    hello_term.parents = ["parent"]
+    hello_term.term_tags = ["a", "b"]
+    repo.add(hello_term)
+    repo.commit()
+
+    assert_parent_has(3, "something", hello_term.current_image, [])
+
+
+def test_save_existing_child_creates_new_populated_parent(
+    app_context, repo, hello_term
+):
+    """
+    Given a Term with parents = [ 'newparent' ],
+    new parent DBTerm is created, and is assigned translation and image and tag.
+
+    The child's data is propagated up if needed, to 'fill in' missing parent data.
+    """
+    repo.add(hello_term)
+    repo.commit()
+    assert_sql_result("select WoText from words", ["HELLO"], "no parent yet")
+
+    hello_term.parents = ["parent"]
+    hello_term.term_tags = ["a", "b"]
+    repo.add(hello_term)
+    repo.commit()
+
+    t = hello_term
+    assert_parent_has(t.status, t.translation, t.current_image, ["a", "b"])
+
+
+def test_save_existing_child_populates_existing_unknown_parent(
+    app_context, repo, english, hello_term
+):
+    "Existing parent with status 0 is bumped to status 1."
+    create_parent(english, status=0, tags=["a"])
+
+    repo.add(hello_term)
+    repo.commit()
 
     parent = repo.find(hello_term.language_id, "parent")
-    assert isinstance(parent, Term), "is a Term bus. object"
-    assert parent.text == "parent"
-    assert parent.term_tags == hello_term.term_tags
-    assert parent.term_tags == ["a", "b"]  # just spelling it out.
-    assert parent.translation == hello_term.translation
-    assert parent.current_image == hello_term.current_image
-    assert parent.parents == []
+    assert parent.status == 0, "parent still unknown"
+
+    h2 = repo.find(hello_term.language_id, hello_term.text)
+    h2.parents = ["parent"]
+    h2.term_tags = ["a", "b"]
+    repo.add(h2)
+    repo.commit()
+
+    t = hello_term
+    assert_parent_has(t.status, t.translation, t.current_image, ["a", "b"])
 
 
-def test_save_with_existing_but_unknown_parent(app_context, repo, english, hello_term):
-    "Existing parent with status 0 is bumped to status 1."
-    p = DBTerm(english, "parent")
-    p.status = 0
-    db.session.add(p)
-    db.session.commit()
+def test_update_child_add_existing_parent_does_not_change_parent_data_even_if_missing(
+    app_context, repo, english, hello_term
+):
+    """
+    If a parent existed before, and the child existed before, then
+    editing the child shouldn't affect the parent, even if the
+    parent's translation and image are empty -- reason: they have been
+    created and are specifically empty.
+    """
+    create_parent(english, translation=None, image=None, status=3)
 
+    repo.add(hello_term)
+    repo.commit()
+
+    hello_term = repo.find(hello_term.language_id, hello_term.text)
+    assert hello_term is not None, "Have hello_term"
     hello_term.parents = ["parent"]
     hello_term.term_tags = ["a", "b"]
     repo.add(hello_term)
     repo.commit()
 
-    sql = "select WoText, WoStatus from words order by WoText"
-    assert_sql_result(sql, ["HELLO; 1", "parent; 1"], "parent status set to 1")
+    assert_parent_has(3, None, None, [])
+
+
+def test_update_child_with_parent_does_not_change_parent_data_even_if_missing(
+    app_context, repo, english, hello_term
+):
+    """
+    If a parent existed before, and the child existed before, then
+    editing the child shouldn't affect the parent, even if the
+    parent's translation and image are empty -- reason: they have been
+    created and are specifically empty.
+    """
+    p = create_parent(english, translation=None, image=None, status=3)
+
+    hello_term.parents = ["parent"]
+    repo.add(hello_term)
+    repo.commit()
+
+    # Parent updated on initial save.
+    assert_parent_has(3, hello_term.translation, hello_term.current_image, [])
+
+    # Re-set parent.
+    p.translation = None
+    p.set_current_image(None)
+    db.session.add(p)
+    db.session.commit()
+    assert_parent_has(3, None, None, [])
+
+    # Re-update existing child term.
+    hello_term = repo.find(hello_term.language_id, hello_term.text)
+    assert hello_term.parents == ["parent"], "parent still set"
+    hello_term.translation = "UPDATED"
+    hello_term.current_image = "UPDATED.PNG"
+    repo.add(hello_term)
+    repo.commit()
+
+    # Parent not changed.
+    assert_parent_has(3, None, None, [])
 
 
 def test_save_remove_parent_breaks_link(app_context, repo, hello_term):
@@ -390,7 +550,7 @@ def test_load(empty_db, english, repo):
 
     term = repo.load(t.id)
     assert term.id == t.id
-    assert term.language.id == t.language.id, "lang object set"
+    assert term.language_id == t.language.id
     assert term.language_id == english.id
     assert term.text == "Hello"
     assert term.original_text == "Hello"
@@ -458,7 +618,7 @@ def test_find_or_new_existing_word(spanish, repo):
     t = repo.find_or_new(spanish.id, "bebida")
     assert t.id > 0, "exists"
     assert t.text == "BEBIDA"
-    assert t.language.id == spanish.id, "lang object set"
+    assert t.language_id == spanish.id, "lang id set"
 
 
 def test_find_or_new_non_existing(spanish, repo):
@@ -466,7 +626,7 @@ def test_find_or_new_non_existing(spanish, repo):
     t = repo.find_or_new(spanish.id, "TENGO")
     assert t.id is None
     assert t.text == "TENGO"
-    assert t.language.id == spanish.id, "lang object set"
+    assert t.language_id == spanish.id, "lang id set"
 
 
 def test_find_or_new_existing_multi_word(spanish, repo):
@@ -735,6 +895,43 @@ def test_get_references_only_includes_read_texts(spanish, repo):
 
     refs = repo.find_references(tengo)
     assert len(refs["term"]) == 2, "have refs once text is read"
+
+
+def _make_read_text(title, body, lang):
+    "Make a text, mark it read."
+    text = make_text(title, body, lang)
+    text.read_date = datetime.now()
+    db.session.add(text)
+    db.session.commit()
+    return text
+
+
+@pytest.mark.sentences
+def test_issue_531_spanish_ref_search_case_insens_normal(spanish, repo):
+    "Spanish was finding 'normal' upper/lower chars that sqlite could handle."
+    _make_read_text("hola", "TENGO.  tengo.", spanish)
+    t = add_terms(spanish, ["tengo"])[0]
+
+    refs = repo.find_references(t)
+    assert len(refs["term"]) == 2, "both found"
+
+
+@pytest.mark.sentences
+def test_issue_531_spanish_ref_search_case_insens_accented(spanish, repo):
+    "Spanish wasn't finding different case of accented chars."
+    _make_read_text("hola", "Ábrelo.  ábrelo.", spanish)
+    t = add_terms(spanish, ["ábrelo"])[0]
+    refs = repo.find_references(t)
+    assert len(refs["term"]) == 2, "both found"
+
+
+@pytest.mark.sentences
+def test_issue_531_turkish_ref_search_is_case_insensitive(turkish, repo):
+    "Turkish upper/lower case letters are quite different!."
+    _make_read_text("Test", "ışık. Işık", turkish)
+    t = add_terms(turkish, ["ışık"])[0]
+    refs = repo.find_references(t)
+    assert len(refs["term"]) == 2, "both found"
 
 
 @pytest.mark.sentences

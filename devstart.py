@@ -21,8 +21,10 @@ python `pwd`/devstart.py
 import os
 import argparse
 import logging
-from lute.app_factory import create_app
+from lute import __version__
+from lute.app_factory import create_app, data_initialization
 from lute.config.app_config import AppConfig
+from lute.db import db
 
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
@@ -40,14 +42,17 @@ def start(port):
             #  why-does-running-the-flask-dev-server-run-itself-twice
             # Reloading, do nothing.
             return
-        print(s)
+        print(s, flush=True)
 
     config_file = AppConfig.default_config_filename()
     dev_print("")
     app = create_app(config_file, output_func=dev_print)
+    with app.app_context():
+        data_initialization(db.session, dev_print)
 
     ac = AppConfig(config_file)
-    dev_print(f"\ndb name: {ac.dbname}")
+    dev_print(f"\nversion {__version__}")
+    dev_print(f"db name: {ac.dbname}")
     dev_print(f"data: {ac.datapath}")
     dev_print(f"Running at: http://localhost:{port}\n")
 

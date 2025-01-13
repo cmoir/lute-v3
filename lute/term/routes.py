@@ -4,6 +4,7 @@
 
 import os
 import csv
+import json
 from flask import (
     Blueprint,
     request,
@@ -12,13 +13,23 @@ from flask import (
     redirect,
     current_app,
     send_file,
+    flash,
 )
 from lute.models.language import Language
-from lute.models.term import Term as DBTerm
-from lute.models.setting import UserSetting
+from lute.models.term import Status
+from lute.models.repositories import (
+    LanguageRepository,
+    TermRepository,
+    UserSettingRepository,
+)
 from lute.utils.data_tables import DataTablesFlaskParamParser
 from lute.term.datatables import get_data_tables_list
 from lute.term.model import Repository, Term
+from lute.term.service import (
+    Service as TermService,
+    TermServiceException,
+    BulkTermUpdateData,
+)
 from lute.db import db
 from lute.term.forms import TermForm
 import lute.utils.formutils
@@ -30,12 +41,20 @@ bp = Blueprint("term", __name__, url_prefix="/term")
 @bp.route("/index/<search>", methods=["GET"])
 def index(search):
     "Index page."
-    DBTerm.delete_empty_images()
+    repo = TermRepository(db.session)
+    repo.delete_empty_images()
     languages = db.session.query(Language).order_by(Language.name).all()
     langopts = [(lang.id, lang.name) for lang in languages]
     langopts = [(0, "(all)")] + langopts
+    statuses = [s for s in db.session.query(Status).all() if s.id != Status.UNKNOWN]
+    r = Repository(db.session)
     return render_template(
-        "term/index.html", initial_search=search, language_options=langopts
+        "term/index.html",
+        initial_search=search,
+        language_options=langopts,
+        statuses=statuses,
+        tags=r.get_term_tags(),
+        in_term_index_listing=True,
     )
 
 
@@ -60,8 +79,67 @@ def datatables_active_source():
     "Datatables data for terms."
     parameters = DataTablesFlaskParamParser.parse_params(request.form)
     _load_term_custom_filters(request.form, parameters)
-    data = get_data_tables_list(parameters)
+    data = get_data_tables_list(parameters, db.session)
     return jsonify(data)
+
+
+def get_bulk_update_from_form(form):
+    "Load the BulkTermUpdateData from the _bulk_edit_form_fields.html form."
+    bud = BulkTermUpdateData()
+    term_ids = form.get("term_ids").strip()
+    if term_ids == "":
+        return bud
+    bud.term_ids = [int(tid.strip()) for tid in term_ids.split(",")]
+
+    bud.lowercase_terms = form.get("lowercase_terms", "off") == "on"
+    bud.remove_parents = form.get("remove_parents", "off") == "on"
+    pdata = []
+    if form.get("parent", "") != "":
+        pdata = json.loads(form.get("parent"))
+    if len(pdata) == 1:
+        pdata = pdata[0]
+        bud.parent_text = pdata.get("value")
+        if "id" in pdata:
+            bud.parent_id = int(pdata.get("id"))
+
+    bud.change_status = form.get("change_status", "off") == "on"
+    if "status" in form:
+        bud.status_value = int(form.get("status"))
+
+    def _get_tags(form_field_name):
+        if form.get(form_field_name, "") == "":
+            return []
+        return [td["value"] for td in json.loads(form.get(form_field_name))]
+
+    bud.add_tags = _get_tags("add_tags")
+    bud.remove_tags = _get_tags("remove_tags")
+
+    return bud
+
+
+@bp.route("/bulk_edit_from_index", methods=["POST"])
+def bulk_edit_from_index():
+    "Edit from the term index listing."
+    bud = get_bulk_update_from_form(request.form)
+    svc = TermService(db.session)
+    try:
+        svc.apply_bulk_updates(bud)
+    except TermServiceException as ex:
+        flash(f"Error: {str(ex)}", "notice")
+    return redirect("/term/index", 302)
+
+
+@bp.route("/bulk_edit_from_reading_pane", methods=["POST"])
+def bulk_edit_from_reading_pane():
+    "Reading pane updates requires special redirect."
+    bud = get_bulk_update_from_form(request.form)
+    svc = TermService(db.session)
+    try:
+        svc.apply_bulk_updates(bud)
+    except TermServiceException as ex:
+        flash(f"Error: {str(ex)}", "notice")
+        return redirect("/read/term_bulk_edit_form", 302)
+    return render_template("/read/updated.html", term_text=None)
 
 
 @bp.route("/export_terms", methods=["POST"])
@@ -71,47 +149,44 @@ def export_terms():
     _load_term_custom_filters(request.form, parameters)
     parameters["length"] = 1000000
     outfile = os.path.join(current_app.env_config.temppath, "export_terms.csv")
-    data = get_data_tables_list(parameters)
-    render_data = data["data"]
+    data = get_data_tables_list(parameters, db.session)
+    term_data = data["data"]
 
-    # Fields as returned from the datatables query.
-    headings = [
-        "OMIT_Checkbox",
-        "term",
-        "parent",
-        "translation",
-        "language",
-        "tags",
-        "OMIT_status_text",
-        "added",
-        "OMIT_WoID",
-        "OMIT_LgID",
-        "OMIT_ImageSource",
-        "status",
-        "link_status",
-        "OMIT_status_text",
-        "pronunciation",
+    # Term data is an array of dicts, with the sql field name as dict
+    # keys.  These need to be mapped to headings.
+    heading_to_fieldname = {
+        "term": "WoText",
+        "parent": "ParentText",
+        "translation": "WoTranslation",
+        "language": "LgName",
+        "tags": "TagList",
+        "added": "WoCreated",
+        "status": "StID",
+        "link_status": "SyncStatus",
+        "pronunciation": "WoRomanization",
+    }
+
+    headings = heading_to_fieldname.keys()
+    output_data = [
+        [r[heading_to_fieldname[fieldname]] for fieldname in headings]
+        for r in term_data
     ]
-    columns_to_exclude = []
-    for i, h in enumerate(headings):
-        if h.startswith("OMIT_"):
-            columns_to_exclude.append(i)
-
-    output_data = [headings] + render_data
     with open(outfile, "w", encoding="utf-8", newline="") as f:
         csv_writer = csv.writer(f)
-        for row in output_data:
-            filtered_row = [
-                value for i, value in enumerate(row) if i not in columns_to_exclude
-            ]
-            csv_writer.writerow(filtered_row)
+        csv_writer.writerow(headings)
+        csv_writer.writerows(output_data)
 
     return send_file(outfile, as_attachment=True, download_name="Terms.csv")
 
 
 def handle_term_form(
-    term, repo, form_template_name, return_on_success, embedded_in_reading_frame=False
-):
+    term,
+    repo,
+    session,
+    form_template_name,
+    return_on_success,
+    embedded_in_reading_frame=False,
+):  # pylint: disable=too-many-arguments,too-many-positional-arguments
     """
     Handle a form post.
 
@@ -119,16 +194,13 @@ def handle_term_form(
     lives in an iframe in the reading frames and returns a different
     template on success.
     """
-    # print(f"in handle_term_form with term.id = {term.id}", flush=True)
-    form = TermForm(obj=term)
-    # parents = [{"value": p} for p in term.parents]
-    # form.parentslist.data = json.dumps(parents)
+    form = TermForm(obj=term, session=session)
 
     # Flash messages get added on things like term imports.
     # The user opening the form is treated as an acknowledgement.
     term.flash_message = None
 
-    form.language_id.choices = lute.utils.formutils.language_choices()
+    form.language_id.choices = lute.utils.formutils.language_choices(session)
 
     if form.validate_on_submit():
         form.populate_obj(term)
@@ -140,8 +212,10 @@ def handle_term_form(
     # See DUPLICATE_TERM_CHECK comments in other files.
 
     hide_pronunciation = False
-    term_language = term._language  # pylint: disable=protected-access
-
+    language_repo = LanguageRepository(session)
+    term_language = language_repo.find(
+        term.language_id or -1
+    )  # -1 hack for no lang set.
     if term_language is not None:
         hide_pronunciation = not term_language.show_romanization
 
@@ -153,7 +227,8 @@ def handle_term_form(
     else:
         # The language select control is shown and this is a new term,
         # so use the default value.
-        current_language_id = int(UserSetting.get_value("current_language_id"))
+        us_repo = UserSettingRepository(db.session)
+        current_language_id = int(us_repo.get_value("current_language_id"))
         form.language_id.data = current_language_id
 
     return render_template(
@@ -161,7 +236,7 @@ def handle_term_form(
         form=form,
         term=term,
         duplicated_term=form.duplicated_term,
-        language_dicts=Language.all_dictionaries(),
+        language_dicts=language_repo.all_dictionaries(),
         hide_pronunciation=hide_pronunciation,
         tags=repo.get_term_tags(),
         embedded_in_reading_frame=embedded_in_reading_frame,
@@ -173,7 +248,7 @@ def _handle_form(term, repo, redirect_to="/term/index"):
     Handle the form post, redirecting to specified url.
     """
     return handle_term_form(
-        term, repo, "/term/formframes.html", redirect(redirect_to, 302)
+        term, repo, db.session, "/term/form.html", redirect(redirect_to, 302)
     )
 
 
@@ -182,7 +257,7 @@ def edit(termid):
     """
     Edit a term.
     """
-    repo = Repository(db)
+    repo = Repository(db.session)
     term = repo.load(termid)
     if term.status == 0:
         term.status = 1
@@ -194,7 +269,7 @@ def edit_by_text(langid, text):
     """
     Edit a term.
     """
-    repo = Repository(db)
+    repo = Repository(db.session)
     term = repo.find_or_new(langid, text)
     if term.status == 0:
         term.status = 1
@@ -206,7 +281,7 @@ def new():
     """
     Create a term.
     """
-    repo = Repository(db)
+    repo = Repository(db.session)
     term = Term()
     return _handle_form(term, repo, "/term/new")
 
@@ -216,7 +291,7 @@ def search_by_text_in_language(text, langid):
     "JSON data for parent data."
     if text.strip() == "" or langid == 0:
         return []
-    repo = Repository(db)
+    repo = Repository(db.session)
     matches = repo.find_matches(langid, text)
 
     def _make_entry(t):
@@ -234,7 +309,7 @@ def search_by_text_in_language(text, langid):
 @bp.route("/sentences/<int:langid>/<text>", methods=["GET"])
 def sentences(langid, text):
     "Get sentences for terms."
-    repo = Repository(db)
+    repo = Repository(db.session)
     # Use find_or_new(): if the user clicks on a parent tag
     # in the term form, and the parent does not exist yet, then
     # we're creating a new term.
@@ -266,7 +341,7 @@ def bulk_update_status():
       updates: [ { new_status: 1, termids: [ 42, ] }, ... }, ]
     }
     """
-    repo = Repository(db)
+    repo = Repository(db.session)
 
     data = request.get_json()
     updates = data.get("updates")
@@ -282,33 +357,12 @@ def bulk_update_status():
     return jsonify("ok")
 
 
-@bp.route("/bulk_set_parent", methods=["POST"])
-def bulk_set_parent():
-    "Set the parent for terms."
-    data = request.get_json()
-    termids = data.get("wordids")
-    parenttext = data.get("parenttext")
-    parent = None
-    repo = Repository(db)
-    for tid in termids:
-        term = repo.load(int(tid))
-        if parent is None:
-            parent = repo.find(term.language_id, parenttext)
-        if term.parents != [parenttext]:
-            term.parents = [parenttext]
-            term.status = parent.status
-            term.sync_status = True
-        repo.add(term)
-    repo.commit()
-    return jsonify("ok")
-
-
 @bp.route("/bulk_delete", methods=["POST"])
 def bulk_delete():
     "Delete terms."
     data = request.get_json()
     termids = data.get("wordids")
-    repo = Repository(db)
+    repo = Repository(db.session)
     for tid in termids:
         term = repo.load(int(tid))
         repo.delete(term)
@@ -321,7 +375,7 @@ def delete(termid):
     """
     Delete a term.
     """
-    repo = Repository(db)
+    repo = Repository(db.session)
     term = repo.load(termid)
     repo.delete(term)
     repo.commit()

@@ -8,8 +8,8 @@ import pytest
 
 from lute.config.app_config import AppConfig
 from lute.db import db
-from lute.language.service import get_language_def
-import lute.db.demo
+import lute.db.management
+from lute.language.service import Service
 from lute.app_factory import create_app
 
 from lute.models.language import Language
@@ -88,7 +88,7 @@ def fixture_empty_db(app_context):
     """
     Wipe the db.
     """
-    lute.db.management.delete_all_data()
+    lute.db.management.delete_all_data(db.session)
 
 
 @pytest.fixture(name="client")
@@ -107,7 +107,10 @@ def _get_test_language(lang_name):
     lang = db.session.query(Language).filter(Language.name == lang_name).first()
     if lang is not None:
         return lang
-    lang = get_language_def(lang_name)["language"]
+    service = Service(db.session)
+    lang = service.get_language_def(lang_name).language
+    db.session.add(lang)
+    db.session.commit()
     return lang
 
 

@@ -2,14 +2,12 @@
 /language endpoints.
 """
 
-from sqlalchemy import func
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, current_app, render_template, redirect, url_for, flash
 from lute.models.language import Language
-from lute.models.setting import UserSetting
-from lute.models.book import Book
-from lute.models.term import Term
-import lute.language.service
+from lute.models.repositories import UserSettingRepository
+from lute.language.service import Service
 from lute.language.forms import LanguageForm
 from lute.db import db
 from lute.parse.registry import supported_parsers
@@ -20,47 +18,29 @@ bp = Blueprint("language", __name__, url_prefix="/language")
 @bp.route("/index")
 def index():
     """
-    List all languages.
-
-    This includes the Book and Term count for each Language.  These
-    counts are pulled in by subqueries, because Language doesn't have
-    "books" and "terms" members ... I was having trouble with session
-    management when these were added, and they're only used here, so
-    this is good enough for now.
+    List all languages, with book and term counts.
     """
 
-    def create_count_subquery(class_, count_column):
-        # Re the pylint disable, ref
-        # https://github.com/pylint-dev/pylint/issues/8138 ...
-        ret = (
-            db.session.query(
-                class_.language_id,
-                # pylint: disable=not-callable
-                func.count(class_.id).label(count_column),
-            )
-            .group_by(class_.language_id)
-            .subquery()
-        )
-        return ret
-
-    # Create subqueries for counting books and terms
-    book_subquery = create_count_subquery(Book, "book_count")
-    term_subquery = create_count_subquery(Term, "term_count")
-
-    # Query to join Language with book and term counts
-    query = (
-        db.session.query(
-            Language, book_subquery.c.book_count, term_subquery.c.term_count
-        )
-        .outerjoin(book_subquery, Language.id == book_subquery.c.language_id)
-        .outerjoin(term_subquery, Language.id == term_subquery.c.language_id)
-    )
-
-    results = query.all()
-
-    results = [rec for rec in results if rec[0].is_supported is True]
-
-    return render_template("language/index.html", language_data=results)
+    # Using plain sql, easier to get bulk quantities.
+    sql = """
+    select LgID, LgName, book_count, term_count from languages
+    left outer join (
+      select BkLgID, count(BkLgID) as book_count from books
+      group by BkLgID
+    ) bc on bc.BkLgID = LgID
+    left outer join (
+      select WoLgID, count(WoLgID) as term_count from words
+      where WoStatus != 0
+      group by WoLgID
+    ) tc on tc.WoLgID = LgID
+    order by LgName
+    """
+    result = db.session.execute(text(sql)).all()
+    languages = [
+        {"LgID": row[0], "LgName": row[1], "book_count": row[2], "term_count": row[3]}
+        for row in result
+    ]
+    return render_template("language/index.html", language_data=languages)
 
 
 def _handle_form(language, form) -> bool:
@@ -79,9 +59,10 @@ def _handle_form(language, form) -> bool:
             flash(f"Language {language.name} updated", "success")
             result = True
         except IntegrityError as e:
+            current_app.db.session.rollback()
             msg = e.orig
             if "languages.LgName" in f"{e.orig}":
-                msg = f"{language.name} already exists."
+                msg = f"Language {form.name.data} already exists."
             flash(msg, "error")
 
     return result
@@ -135,7 +116,8 @@ def new(langname):
     """
     Create a new language.
     """
-    predefined = lute.language.service.predefined_languages()
+    service = Service(db.session)
+    predefined = service.supported_predefined_languages()
     language = Language()
     if langname is not None:
         candidates = [lang for lang in predefined if lang.name == langname]
@@ -154,7 +136,8 @@ def new(langname):
         # adds language Y, the filter stays on X, which may be
         # disconcerting/confusing.  Forcing a reselect is painless and
         # unambiguous.
-        UserSetting.set_value("current_language_id", 0)
+        repo = UserSettingRepository(db.session)
+        repo.set_value("current_language_id", 0)
         db.session.commit()
         return redirect("/")
 
@@ -173,14 +156,16 @@ def delete(langid):
     language = db.session.get(Language, langid)
     if not language:
         flash(f"Language {langid} not found")
-    Language.delete(language)
+    db.session.delete(language)
+    db.session.commit()
     return redirect(url_for("language.index"))
 
 
 @bp.route("/list_predefined", methods=["GET"])
 def list_predefined():
-    "Show predefined languages that are not already in the db."
-    predefined = lute.language.service.predefined_languages()
+    "Show supported predefined languages that are not already in the db."
+    service = Service(db.session)
+    predefined = service.supported_predefined_languages()
     existing_langs = db.session.query(Language).all()
     existing_names = [l.name for l in existing_langs]
     new_langs = [p for p in predefined if p.name not in existing_names]
@@ -190,8 +175,10 @@ def list_predefined():
 @bp.route("/load_predefined/<langname>", methods=["GET"])
 def load_predefined(langname):
     "Load a predefined language and its stories."
-    lang_id = lute.language.service.load_language_def(langname)
-    UserSetting.set_value("current_language_id", lang_id)
+    service = Service(db.session)
+    lang_id = service.load_language_def(langname)
+    repo = UserSettingRepository(db.session)
+    repo.set_value("current_language_id", lang_id)
     db.session.commit()
     flash(f"Loaded {langname} and sample book(s)")
     return redirect("/")

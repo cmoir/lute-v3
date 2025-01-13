@@ -18,11 +18,11 @@ import os
 from sqlalchemy import text
 from flask import Blueprint, current_app, Response, jsonify, redirect, flash
 from lute.models.language import Language
-from lute.models.setting import UserSetting
+from lute.models.repositories import UserSettingRepository
 import lute.parse.registry
 from lute.db import db
 import lute.db.management
-import lute.db.demo
+from lute.db.demo import Service as DemoService
 
 
 bp = Blueprint("dev_api", __name__, url_prefix="/dev_api")
@@ -38,7 +38,7 @@ def _ensure_is_test_db():
 @bp.route("/wipe_db", methods=["GET"])
 def wipe_db():
     "Clean it all."
-    lute.db.management.delete_all_data()
+    lute.db.management.delete_all_data(db.session)
     flash("db wiped")
     return redirect("/", 302)
 
@@ -46,8 +46,10 @@ def wipe_db():
 @bp.route("/load_demo", methods=["GET"])
 def load_demo():
     "Clean out everything, and load the demo."
-    lute.db.management.delete_all_data()
-    lute.db.demo.load_demo_data()
+    lute.db.management.delete_all_data(db.session)
+    demosvc = DemoService(db.session)
+    demosvc.set_load_demo_flag()
+    demosvc.load_demo_data()
     flash("demo loaded")
     return redirect("/", 302)
 
@@ -55,11 +57,14 @@ def load_demo():
 @bp.route("/load_demo_languages", methods=["GET"])
 def load_demo_languages():
     "Clean out everything, and load the demo langs with dummy dictionaries."
-    lute.db.management.delete_all_data()
-    lute.db.demo.load_demo_languages()
+    lute.db.management.delete_all_data(db.session)
+    demosvc = DemoService(db.session)
+    demosvc.load_demo_languages()
     langs = db.session.query(Language).all()
     for lang in langs:
-        lang.dictionaries[0].dicturi = f"/dev_api/dummy_dict/{lang.name}/###"
+        d = lang.dictionaries[0]
+        d.dicturi = f"/dev_api/dummy_dict/{lang.name}/[LUTE]"
+        d.dicttype = "embeddedhtml"  # Ensure not pop-up
         db.session.add(lang)
     db.session.commit()
     return redirect("/", 302)
@@ -68,7 +73,8 @@ def load_demo_languages():
 @bp.route("/load_demo_stories", methods=["GET"])
 def load_demo_stories():
     "Stories only.  No db wipe."
-    lute.db.demo.load_demo_stories()
+    demosvc = DemoService(db.session)
+    demosvc.load_demo_stories()
     flash("stories loaded")
     return redirect("/", 302)
 
@@ -112,6 +118,14 @@ def sql_result(sql):
     return jsonify(content)
 
 
+@bp.route("/execsql/<string:sql>", methods=["GET"])
+def exec_sql(sql):
+    "Execute arbitrary sql!!!  NO CHECKS ARE DONE!"
+    db.session.execute(text(sql))
+    db.session.commit()
+    return jsonify("ok")
+
+
 @bp.route("/dummy_dict/<string:langname>/<string:term>", methods=["GET"])
 def dummy_language_dict(langname, term):
     "Fake language dictionary/term lookup."
@@ -146,7 +160,8 @@ def disable_parser(parsername, renameto):
 @bp.route("/disable_backup", methods=["GET"])
 def disable_backup():
     "Disables backup -- tests don't need to back up."
-    UserSetting.set_value("backup_enabled", False)
+    repo = UserSettingRepository(db.session)
+    repo.set_value("backup_enabled", False)
     db.session.commit()
     flash("backup disabled")
     return redirect("/", 302)

@@ -15,7 +15,7 @@ class LookupButton {
   /** All LookupButtons created. */
   static all = [];
 
-  constructor(dictURL, frameName) {
+  constructor(frameName) {
     let createIFrame = function(name) {
       const f = document.createElement("iframe");
       f.name = name;
@@ -130,7 +130,7 @@ class ImageLookupButton extends GeneralLookupButton {
       if (parents.length == 1)
         use_text = parents[0];
 
-      const raw_bing_url = 'https://www.bing.com/images/search?q=###&form=HDRSC2&first=1&tsc=ImageHoverTitle';
+      const raw_bing_url = 'https://www.bing.com/images/search?q=[LUTE]&form=HDRSC2&first=1&tsc=ImageHoverTitle';
       const binghash = raw_bing_url.replace('https://www.bing.com/images/search?', '');
       const url = `/bing/search/${LookupButton.LANG_ID}/${encodeURIComponent(use_text)}/${encodeURIComponent(binghash)}`;
 
@@ -222,7 +222,8 @@ class DictButton extends LookupButton {
           replace(/\s+/g, ' ');
     const searchterm = encodeURIComponent(cleantext).
           replaceAll(sqlZWS, '');
-    ret = ret.replace('###', searchterm);
+    ret = ret.replace('[LUTE]', searchterm);
+    ret = ret.replace('###', searchterm);  // TODO remove_old_###_placeholder
     return ret;
   }
 
@@ -249,8 +250,8 @@ class DictButton extends LookupButton {
 
     let url = this._get_lookup_url(dicturl, text);
 
-    const is_bing = (dicturl.indexOf('www.bing.com') != -1);
-    if (is_bing) {
+    const is_bing_image_search = (dicturl.indexOf('www.bing.com/images') != -1);
+    if (is_bing_image_search) {
       // TODO handle_image_lookup_separately: don't mix term lookups with image lookups.
       let use_text = text;
       const binghash = dicturl.replace('https://www.bing.com/images/search?', '');

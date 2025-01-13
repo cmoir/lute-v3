@@ -3,8 +3,8 @@ Utility methods for tests.
 """
 
 from lute.models.term import Term
-from lute.models.book import Book
-from lute.read.render.service import get_paragraphs
+from lute.models.book import Book, Text
+from lute.read.render.service import Service
 from lute.db import db
 
 
@@ -12,17 +12,28 @@ def add_terms(language, term_array):
     """
     Make and save terms.
     """
+    ret = []
     for term in term_array:
         t = Term(language, term)
         db.session.add(t)
+        ret.append(t)
     db.session.commit()
+    return ret
 
 
 def make_book(title, content, language):
     """
     Make a book.
     """
-    b = Book.create_book(title, language, content)
+    b = Book()
+    b.title = title
+    b.language = language
+    if isinstance(content, str):
+        content = [content]
+    n = 0
+    for c in content:
+        n += 1
+        _ = Text(b, c, n)
     return b
 
 
@@ -46,9 +57,10 @@ def get_rendered_string(text, imploder="/", overridestringize=None):
 
     usestringize = overridestringize or stringize
     ret = []
-    paras = get_paragraphs(text.text, text.book.language)
+    service = Service(db.session)
+    paras = service.get_paragraphs(text.text, text.book.language)
     for p in paras:
-        tis = [t for s in p for t in s.textitems]
+        tis = [t for s in p for t in s]
         ss = [usestringize(ti) for ti in tis]
         ret.append(imploder.join(ss))
     return "/<PARA>/".join(ret)

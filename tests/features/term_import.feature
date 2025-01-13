@@ -251,6 +251,38 @@ Feature: Term import
             g; 98
 
 
+    Scenario: Import should not update status if status not included
+        Given import file:
+            language,term,translation
+            Spanish,a,aa
+        When import with create true, update false, new as unknown true
+        Then import should succeed with 1 created, 0 updated, 0 skipped
+
+        Given import file:
+            language,term,translation,status
+            Spanish,b,bb,1
+            Spanish,c,cc,2
+        When import with create true, update false
+        Then import should succeed with 2 created, 0 updated, 0 skipped
+
+        Then sql "select WoText, WoTranslation, WoStatus from words order by WoText" should return:
+            a; aa; 0
+            b; bb; 1
+            c; cc; 2
+
+        Given import file:
+            language,term,translation
+            Spanish,a,aaNEW
+            Spanish,b,bbNEW
+            Spanish,c,ccNEW
+        When import with create false, update true, new as unknown true
+        Then import should succeed with 0 created, 3 updated, 0 skipped
+        And sql "select WoText, WoTranslation, WoStatus from words order by WoText" should return:
+            a; aaNEW; 0
+            b; bbNEW; 1
+            c; ccNEW; 2
+
+
     Scenario: Import field names are case-insensitive
         Given import file:
             LANGUAGE,Term,TRANSLATION,paRENT,statUS,TAGS,Pronunciation
@@ -347,7 +379,7 @@ Feature: Term import
             Spanish,a,,1,
             Spanish,b,a,2,y
             Spanish,c,a,3,y
-            Spanish,d,a,4
+            Spanish,d,a,4,
         When import with create false, update true
         Then import should succeed with 0 created, 4 updated, 0 skipped
         And sql "select WoText, WoStatus, WoSyncStatus from words order by WoText" should return:
@@ -495,11 +527,26 @@ Feature: Term import
 
     Scenario: Duplicate term throws
         Given import file:
-            language,term
-            Spanish,gato
-            Spanish,gato
+            language,term,translation
+            Spanish,gato,cat
+            Spanish,gato,kitty
         Then import should fail with message:
             Duplicate terms in import: Spanish: gato
+
+
+    Scenario: Duplicate term but identical line imports ok
+        Given import file:
+            language,term,translation
+            Spanish,gato,cat
+            Spanish,gato,cat
+            Spanish,perro,dog
+            Spanish,gato,cat
+            Spanish,perro,dog
+        When import with create true, update false
+        Then import should succeed with 2 created, 0 updated, 0 skipped
+        And sql "select WoText, WoStatus from words order by WoText" should return:
+            gato; 1
+            perro; 1
 
 
     Scenario: Fix issue 51: mandarin duplicate term throws
@@ -509,6 +556,16 @@ Feature: Term import
             Classical chinese,啊,ah,a,HSK4
         Then import should fail with message:
             Duplicate terms in import: Classical chinese: 啊
+
+
+    Scenario: Fix issue 454 duplicate tags ok
+        Given import file:
+            language,translation,term,parent,status,tags,pronunciation
+            Spanish,cat,gato,,1,"animal,animal",GAH-toh
+        When import with create true, update false
+        Then import should succeed with 1 created, 0 updated, 0 skipped
+        And words table should contain:
+            gato
 
 
     Scenario: Bad status throws
@@ -538,3 +595,19 @@ Feature: Term import
             language,term,status
         Then import should fail with message:
             No terms in file
+
+
+    Scenario: Fix issue 454 too many fields in data line fails
+        Given import file:
+            language,translation,term,parent,status,tags,pronunciation
+            Spanish,cat,gato,,1,animal,GAH-toh,EXTRA_STUFF
+        Then import should fail with message:
+            Extra values on line 1
+
+
+    Scenario: Fix issue 454 too few fields in data line fails
+        Given import file:
+            language,translation,term,parent,status,tags,pronunciation
+            Spanish,cat,gato,,1,animal
+        Then import should fail with message:
+            Missing values on line 1

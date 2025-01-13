@@ -2,11 +2,10 @@
 Show books in datatables.
 """
 
-from lute.db import db
 from lute.utils.data_tables import DataTablesSqliteQuery, supported_parser_type_criteria
 
 
-def get_data_tables_list(parameters, is_archived):
+def get_data_tables_list(parameters, is_archived, session):
     "Book json data for datatables."
     archived = "true" if is_archived else "false"
 
@@ -17,6 +16,7 @@ def get_data_tables_list(parameters, is_archived):
         BkTitle,
         case when currtext.TxID is null then 1 else currtext.TxOrder end as PageNum,
         textcounts.pagecount AS PageCount,
+        booklastopened.lastopeneddate AS LastOpenedDate,
         BkArchived,
         tags.taglist AS TagList,
         textcounts.wc AS WordCount,
@@ -29,6 +29,9 @@ def get_data_tables_list(parameters, is_archived):
     FROM books b
     INNER JOIN languages ON LgID = b.BkLgID
     LEFT OUTER JOIN texts currtext ON currtext.TxID = BkCurrentTxID
+    INNER JOIN (
+        select TxBkID, max(TxStartDate) as lastopeneddate from texts group by TxBkID
+    ) booklastopened on booklastopened.TxBkID = b.BkID
     INNER JOIN (
         SELECT TxBkID, SUM(TxWordCount) as wc, COUNT(TxID) AS pagecount
         FROM texts
@@ -70,8 +73,5 @@ def get_data_tables_list(parameters, is_archived):
     if language_id != 0:
         base_sql += f" and LgID = {language_id}"
 
-    # print(base_sql)
-    session = db.session
     connection = session.connection()
-
     return DataTablesSqliteQuery.get_data(base_sql, parameters, connection)

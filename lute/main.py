@@ -1,7 +1,7 @@
 """
 User entry point.
 
-Start lute running on given port, or 5000 if not set.
+Start lute running on given port, or 5001 if not set.
 
 e.g.
 
@@ -14,8 +14,10 @@ import shutil
 import logging
 import textwrap
 from waitress import serve
-from lute.app_factory import create_app
+from lute import __version__
+from lute.app_factory import create_app, data_initialization
 from lute.config.app_config import AppConfig
+from lute.db import db
 
 logging.getLogger("waitress.queue").setLevel(logging.ERROR)
 logging.getLogger("natto").setLevel(logging.CRITICAL)
@@ -73,10 +75,12 @@ def _get_config_file_path(config_file_path=None):
 
 def _start(args):
     "Configure and start the app."
-    _print("\nStarting Lute.\n")
+    _print(f"\nStarting Lute version {__version__}.\n")
 
     config_file_path = _get_config_file_path(args.config)
     app = create_app(config_file_path, output_func=_print)
+    with app.app_context():
+        data_initialization(db.session, _print)
 
     close_msg = """
     When you're finished reading, stop this process
@@ -90,14 +94,16 @@ def _start(args):
         """
     _print(textwrap.dedent(close_msg))
 
-    msg = f"""Lute is running.  Open a web browser, and go to:
+    host_ip = "127.0.0.1" if args.local else "0.0.0.0"
+    ip_port = f"{host_ip}:{args.port}"
+    msg = f"""Lute v{__version__} is running on {ip_port}.  Open a web browser and go to:
 
     http://localhost:{args.port}
     """
     _print(textwrap.dedent(msg))
 
     try:
-        serve(app, host="0.0.0.0", port=args.port)
+        serve(app, host=host_ip, port=args.port)
     except OSError as err:
         if err.errno == errno.EADDRINUSE:
             msg = [
@@ -113,8 +119,14 @@ def _start(args):
             raise
 
 
-if __name__ == "__main__":
+def start():
+    "Main entry point.  Called via scripts and pyproject.toml."
     parser = argparse.ArgumentParser(description="Start lute.")
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run local only (not accessible on other devices on the same network)",
+    )
     parser.add_argument(
         "--port", type=int, default=5001, help="Port number (default: 5001)"
     )
@@ -139,3 +151,7 @@ if __name__ == "__main__":
         """
 
         print(textwrap.dedent(failmsg))
+
+
+if __name__ == "__main__":
+    start()

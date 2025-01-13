@@ -3,10 +3,11 @@ Book stats tests.
 """
 
 import pytest
+from sqlalchemy.sql import text
 
 from lute.db import db
 from lute.term.model import Term, Repository
-from lute.book.stats import get_status_distribution, refresh_stats, mark_stale
+from lute.book.stats import Service
 
 from tests.utils import make_text, make_book
 from tests.dbasserts import assert_record_count_equals, assert_sql_result
@@ -19,7 +20,7 @@ def add_term(lang, s, status):
     term.language_id = lang.id
     term.text = s
     term.status = status
-    repo = Repository(db)
+    repo = Repository(db.session)
     repo.add(term)
     repo.commit()
 
@@ -35,7 +36,8 @@ def scenario(language, fulltext, terms_and_statuses, expected):
     for ts in terms_and_statuses:
         add_term(language, ts[0], ts[1])
 
-    stats = get_status_distribution(b)
+    svc = Service(db.session)
+    stats = svc.calc_status_distribution(b)
 
     assert stats == expected
 
@@ -106,9 +108,15 @@ def fixture_make_book(empty_db, spanish):
     return b
 
 
+@pytest.fixture(name="service")
+def fixture_service():
+    "svc."
+    return Service(db.session)
+
+
 def add_terms(lang, terms):
     "Create and add term."
-    repo = Repository(db)
+    repo = Repository(db.session)
     for s in terms:
         term = Term()
         term.language = lang
@@ -125,41 +133,69 @@ def assert_stats(expected, msg=""):
     assert_sql_result(sql, expected, msg)
 
 
-def test_cache_loads_when_prompted(_test_book):
+def test_cache_loads_when_prompted(service, _test_book):
     "Have to call refresh_stats() to load stats."
     assert_record_count_equals("bookstats", 0, "nothing loaded")
-    refresh_stats()
+    service.refresh_stats()
     assert_record_count_equals("bookstats", 1, "loaded")
 
 
-def test_stats_smoke_test(_test_book, spanish):
+def test_stats_smoke_test(service, _test_book, spanish):
     "Terms are rendered to count stats."
     add_terms(spanish, ["gato", "TENGO"])
-    refresh_stats()
+    service.refresh_stats()
     assert_stats(
         ["4; 2; 50; {'0': 2, '1': 2, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"]
     )
 
 
-def test_stats_calculates_rendered_text(_test_book, spanish):
+def test_get_stats_calculates_and_caches_stats(service, _test_book, spanish):
+    "Calculating stats is expensive, so store them on get."
+    add_terms(spanish, ["gato", "TENGO"])
+    assert_record_count_equals("bookstats", 0, "cache not loaded")
+    assert_stats([], "No stats cached at start.")
+
+    stats = service.get_stats(_test_book)
+    assert stats.BkID == _test_book.id
+    assert stats.distinctterms == 4
+    assert stats.distinctunknowns == 2
+    assert stats.unknownpercent == 50
+    assert (
+        stats.status_distribution
+        == '{"0": 2, "1": 2, "2": 0, "3": 0, "4": 0, "5": 0, "98": 0, "99": 0}'
+    )
+
+    assert_record_count_equals("bookstats", 1, "cache loaded")
+    assert_stats(
+        ["4; 2; 50; {'0': 2, '1': 2, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"]
+    )
+    stats = service.get_stats(_test_book)
+    assert stats.BkID == _test_book.id
+    assert (
+        stats.status_distribution
+        == '{"0": 2, "1": 2, "2": 0, "3": 0, "4": 0, "5": 0, "98": 0, "99": 0}'
+    )
+
+
+def test_stats_calculates_rendered_text(service, _test_book, spanish):
     "Multiword term counted as one term."
     add_terms(spanish, ["tengo un"])
-    refresh_stats()
+    service.refresh_stats()
     assert_stats(
         ["3; 2; 67; {'0': 2, '1': 1, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"]
     )
 
 
-def test_stats_only_update_books_marked_stale(_test_book, spanish):
+def test_stats_only_update_books_marked_stale(service, _test_book, spanish):
     "Have to mark book as stale, too expensive otherwise."
     add_terms(spanish, ["gato", "TENGO"])
-    refresh_stats()
+    service.refresh_stats()
     assert_stats(
         ["4; 2; 50; {'0': 2, '1': 2, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"]
     )
 
     add_terms(spanish, ["hola"])
-    refresh_stats()
+    service.refresh_stats()
     assert_stats(
         [
             "4; 2; 50; {'0': 2, '1': 2, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"
@@ -167,11 +203,29 @@ def test_stats_only_update_books_marked_stale(_test_book, spanish):
         "not updated",
     )
 
-    mark_stale(_test_book)
-    refresh_stats()
+    service.mark_stale(_test_book)
+    service.refresh_stats()
     assert_stats(
         [
             "4; 1; 25; {'0': 1, '1': 3, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"
         ],
         "updated",
+    )
+
+
+def test_stats_updated_if_field_empty(service, _test_book, spanish):
+    "Have to mark book as stale, too expensive otherwise."
+    add_terms(spanish, ["gato", "TENGO"])
+    service.refresh_stats()
+    assert_stats(
+        ["4; 2; 50; {'0': 2, '1': 2, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"]
+    )
+
+    db.session.execute(text("update bookstats set status_distribution = null"))
+    db.session.commit()
+
+    assert_stats(["4; 2; 50; None"], "Set to none")
+    service.refresh_stats()
+    assert_stats(
+        ["4; 2; 50; {'0': 2, '1': 2, '2': 0, '3': 0, '4': 0, '5': 0, '98': 0, '99': 0}"]
     )

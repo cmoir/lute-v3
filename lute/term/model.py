@@ -9,7 +9,11 @@ import re
 import sqlalchemy
 
 from lute.models.term import Term as DBTerm, TermTag
-from lute.models.language import Language
+from lute.models.repositories import (
+    LanguageRepository,
+    TermRepository,
+    TermTagRepository,
+)
 
 
 class Term:  # pylint: disable=too-many-instance-attributes
@@ -20,12 +24,6 @@ class Term:  # pylint: disable=too-many-instance-attributes
     def __init__(self):
         # The ID of the DBTerm.
         self.id = None
-        # A language object is required as the Term bus. object
-        # must downcase the text and the original_text to see
-        # if anything has changed.
-        self._language = None
-        # Ideally this wouldn't be needed, but the term form
-        # populates this field with the (primitive) language id.
         self.language_id = None
         # The text.
         self.text = None
@@ -46,26 +44,13 @@ class Term:  # pylint: disable=too-many-instance-attributes
             f'<Term BO "{self.text}" lang_id={self.language_id} lang={self.language}>'
         )
 
-    @property
-    def language(self):
-        "Use or get the language."
-        if self._language is not None:
-            return self._language
-        return Language.find(self.language_id)
-
-    @language.setter
-    def language(self, lang):
-        if not isinstance(lang, Language):
-            raise ValueError("not a language")
-        self._language = lang
-
 
 class TermReference:
     "Where a Term has been used in books."
 
     def __init__(
         self, bookid, txid, pgnum, title, sentence=None
-    ):  # pylint: disable=too-many-arguments
+    ):  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self.book_id = bookid
         self.text_id = txid
         self.page_number = pgnum
@@ -78,8 +63,8 @@ class Repository:
     Maps Term BO to and from lute.model.Term.
     """
 
-    def __init__(self, _db):
-        self.db = _db
+    def __init__(self, _session):
+        self.session = _session
 
         # Identity map for business lookup.
         # Note that the same term is stored
@@ -105,12 +90,28 @@ class Repository:
 
     def load(self, term_id):
         "Loads a Term business object for the DBTerm with the id."
-        dbt = DBTerm.find(term_id)
+        dbt = self.session.get(DBTerm, term_id)
         if dbt is None:
             raise ValueError(f"No term with id {term_id} found")
         term = self._build_business_term(dbt)
         self._add_to_identity_map(term)
         return term
+
+    def _search_spec_term(self, langid, text):
+        """
+        Make a term to get the correct text_lc to search for.
+        This ensures that the spec term is properly parsed
+        and downcased.
+        """
+        lang_repo = LanguageRepository(self.session)
+        lang = lang_repo.find(langid)
+        return DBTerm(lang, text)
+
+    def _find_by_spec(self, langid, text):
+        "Do a search using a spec term."
+        spec = self._search_spec_term(langid, text)
+        repo = TermRepository(self.session)
+        return repo.find_by_spec(spec)
 
     def find(self, langid, text):
         """
@@ -121,8 +122,7 @@ class Repository:
         if term is not None:
             return term
 
-        spec = self._search_spec_term(langid, text)
-        dbt = DBTerm.find_by_spec(spec)
+        dbt = self._find_by_spec(langid, text)
         if dbt is None:
             return None
         term = self._build_business_term(dbt)
@@ -168,7 +168,6 @@ class Repository:
 
         spec = self._search_spec_term(langid, text)
         t = Term()
-        t.language = spec.language
         t.language_id = langid
         t.text = spec.text
         t.text_lc = spec.text_lc
@@ -227,12 +226,12 @@ class Repository:
         # print(params)
 
         alchsql = sqlalchemy.text(sql_query)
-        return self.db.session.execute(alchsql, params).fetchall()
+        return self.session.execute(alchsql, params).fetchall()
 
     def get_term_tags(self):
         "Get all available term tags, helper method."
-        tags = self.db.session.query(TermTag).all()
-        return [t.text for t in tags]
+        tags = self.session.query(TermTag).all()
+        return sorted([t.text for t in tags])
 
     def add(self, term):
         """
@@ -241,35 +240,27 @@ class Repository:
         clients should not change it.
         """
         dbterm = self._build_db_term(term)
-        self.db.session.add(dbterm)
+        self.session.add(dbterm)
         return dbterm
 
     def delete(self, term):
         """
         Add term to be deleted to session.
         """
-        spec = self._search_spec_term(term.language_id, term.text)
-        dbt = DBTerm.find_by_spec(spec)
-        if dbt is None:
-            return
-        self.db.session.delete(dbt)
+        dbt = None
+        if term.id is not None:
+            dbt = self.session.get(DBTerm, term.id)
+        else:
+            dbt = self._find_by_spec(term.language_id, term.text)
+        if dbt is not None:
+            self.session.delete(dbt)
 
     def commit(self):
         """
-        Commit everything.
+        Commit everything, flush the map to force refetches.
         """
-        self.db.session.commit()
-
-    def _search_spec_term(self, langid, text):
-        """
-        Make a term to get the correct text_lc to search for.
-
-        Creating a term does parsing and correct downcasing,
-        so term.language.id and term.text_lc match what the
-        db would contain.
-        """
-        lang = Language.find(langid)
-        return DBTerm(lang, text)
+        self.identity_map = {}
+        self.session.commit()
 
     def _build_db_term(self, term):
         "Convert a term business object to a DBTerm."
@@ -280,11 +271,12 @@ class Repository:
         t = None
         if term.id is not None:
             # This is an existing term, so use it directly.
-            t = DBTerm.find(term.id)
+            t = self.session.get(DBTerm, term.id)
         else:
             # New term, or finding by text.
             spec = self._search_spec_term(term.language_id, term.text)
-            t = DBTerm.find_by_spec(spec) or DBTerm()
+            term_repo = TermRepository(self.session)
+            t = term_repo.find_by_spec(spec) or DBTerm()
             t.language = spec.language
 
         t.text = term.text
@@ -300,9 +292,10 @@ class Repository:
         else:
             t.pop_flash_message()
 
+        tt_repo = TermTagRepository(self.session)
         termtags = []
-        for s in term.term_tags:
-            termtags.append(TermTag.find_or_create_by_text(s))
+        for s in list(set(term.term_tags)):
+            termtags.append(tt_repo.find_or_create_by_text(s))
         t.remove_all_term_tags()
         for tt in termtags:
             t.add_term_tag(tt)
@@ -330,24 +323,29 @@ class Repository:
         return t
 
     def _find_or_create_parent(self, pt, language, term, termtags) -> DBTerm:
-        spec = self._search_spec_term(language.id, pt)
-        p = DBTerm.find_by_spec(spec)
+        p = self._find_by_spec(language.id, pt)
+        new_or_unknown_parent = p is None or p.status == 0
+        new_term = term.id is None
 
-        if p is not None:
-            if p.status == 0:  # previously unknown, inherits from term.
-                p.status = term.status
+        if p is None:
+            p = DBTerm(language, pt)
+
+        if new_or_unknown_parent:
+            p.status = term.status
+
+        # Copy translation, image if missing, but _not_ if we're just
+        # re-saving an existing term.
+        if new_or_unknown_parent or new_term:
             if (p.translation or "") == "":
                 p.translation = term.translation
             if (p.get_current_image() or "") == "":
                 p.set_current_image(term.current_image)
-            return p
 
-        p = DBTerm(language, pt)
-        p.status = term.status
-        p.translation = term.translation
-        p.set_current_image(term.current_image)
-        for tt in termtags:
-            p.add_term_tag(tt)
+        # Only copy tags if this is a new parent.  New parents should
+        # _likely_ inherity the tags of the term.
+        if new_or_unknown_parent:
+            for tt in termtags:
+                p.add_term_tag(tt)
 
         return p
 
@@ -355,19 +353,18 @@ class Repository:
         "Create a Term bus. object from a lute.model.term.Term."
         term = Term()
         term.id = dbterm.id
-        term.language = dbterm.language
         term.language_id = dbterm.language.id
 
         text = dbterm.text
-        ### Remove zero-width spaces (zws) from strings for user forms.
-        ###
-        ### NOTE: disabling this as it creates challenges for editing
-        ### terms.  In some cases, the same term may have a zws
-        ### character as part of it; in other cases, it won't, e.g. "
-        ### 集めれ" sometimes is parsed as one token, and sometimes
-        ### two ("集め/れ").  If we strip the zws from the string, then
-        ### when it's posted back, Lute will think that it has changed.
-        ### ... it gets messy.
+        ## Remove zero-width spaces (zws) from strings for user forms.
+        #
+        # NOTE: disabling this as it creates challenges for editing
+        # terms.  In some cases, the same term may have a zws
+        # character as part of it; in other cases, it won't, e.g. "
+        # 集めれ" sometimes is parsed as one token, and sometimes
+        # two ("集め/れ").  If we strip the zws from the string, then
+        # when it's posted back, Lute will think that it has changed.
+        # ... it gets messy.
         # zws = "\u200B"  # zero-width space
         # text = text.replace(zws, "")
         term.text_lc = dbterm.text_lc
@@ -393,7 +390,8 @@ class Repository:
         Return references of term, children, and parents.
         """
         spec = self._search_spec_term(term.language_id, term.text)
-        searchterm = DBTerm.find_by_spec(spec)
+        term_repo = TermRepository(self.session)
+        searchterm = term_repo.find_by_spec(spec)
         if searchterm is None:
             searchterm = spec
 
@@ -420,6 +418,14 @@ class Repository:
         return ret
 
     def _get_references(self, term):
+        """
+        Search the sentences.text_content (or textlc_content if needed).
+
+        sentence.textlc_content is set to '*' if a call to sqlite's LOWER
+        returns the same data as using the sentence Language.parser.  This
+        saves a pile of space, at least in my case with Spanish, as only
+        0.5% of the lowercased sentences actually differ.
+        """
         if term is None:
             return []
 
@@ -441,7 +447,8 @@ class Repository:
                 GROUP BY TxBkID
             ) pc ON pc.TxBkID = texts.TxBkID
             WHERE TxReadDate IS NOT NULL
-            AND LOWER(SeText) LIKE :pattern
+            AND SeText IS NOT NULL
+            AND CASE WHEN SeTextLC == '*' THEN SeText ELSE SeTextLC END LIKE :pattern
             AND BkLgID = {term.language.id}
             LIMIT 20
         """
@@ -449,7 +456,7 @@ class Repository:
 
         pattern = f"%{chr(0x200B)}{term_lc}{chr(0x200B)}%"
         params = {"pattern": pattern}
-        result = self.db.session.execute(query, params)
+        result = self.session.execute(query, params)
         return self._build_term_references(term_lc, result)
 
     def _get_all_refs(self, terms):

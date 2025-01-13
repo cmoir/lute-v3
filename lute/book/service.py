@@ -3,19 +3,19 @@ book helper routines.
 """
 
 import os
-from io import StringIO
+import shutil
+from io import StringIO, TextIOWrapper, BytesIO
 from datetime import datetime
-
-# pylint: disable=unused-import
-from tempfile import TemporaryFile, SpooledTemporaryFile
+import uuid
+from dataclasses import dataclass
+from tempfile import TemporaryFile
 import requests
 from bs4 import BeautifulSoup
 from flask import current_app, flash
 from openepub import Epub, EpubError
 from pypdf import PdfReader
 from subtitle_parser import SrtParser, WebVttParser
-from werkzeug.utils import secure_filename
-from lute.book.model import Book
+from lute.book.model import Repository
 
 
 class BookImportException(Exception):
@@ -29,179 +29,256 @@ class BookImportException(Exception):
         super().__init__(message)
 
 
-def _secure_unique_fname(filename):
-    """
-    Return secure name pre-pended with datetime string.
-    """
-    current_datetime = datetime.now()
-    formatted_datetime = current_datetime.strftime("%Y%m%d_%H%M%S")
-    f = "_".join([formatted_datetime, secure_filename(filename)])
-    return f
+@dataclass
+class BookDataFromUrl:
+    "Data class"
+    title: str = None
+    source_uri: str = None
+    text: str = None
 
 
-def save_audio_file(audio_file_field_data):
-    """
-    Save the file to disk, return its filename.
-    """
-    filename = _secure_unique_fname(audio_file_field_data.filename)
-    fp = os.path.join(current_app.env_config.useraudiopath, filename)
-    audio_file_field_data.save(fp)
-    return filename
+class FileTextExtraction:
+    "Utility to extract text from various file formats."
 
-
-def get_file_content(filefielddata):
-    """
-    Get the content of the file.
-    """
-    content = None
-    _, ext = os.path.splitext(filefielddata.filename)
-    ext = (ext or "").lower()
-    if ext == ".txt":
-        content = get_textfile_content(filefielddata)
-    if ext == ".epub":
-        content = get_epub_content(filefielddata)
-    if ext == ".pdf":
-        msg = """
-        Note: pdf imports can be inaccurate, due to how PDFs are encoded.
-        Please be aware of this while reading.
+    def get_file_content(self, filename, filestream):
         """
-        flash(msg, "notice")
-        content = get_pdf_content_from_form(filefielddata)
-    if ext == ".srt":
-        content = get_srt_content(filefielddata)
-    if ext == ".vtt":
-        content = get_vtt_content(filefielddata)
+        Get the content of the file.
+        """
+        _, ext = os.path.splitext(filename)
+        ext = (ext or "").lower()
 
-    if content is None:
-        raise ValueError(f'Unknown file extension "{ext}"')
-    if content.strip() == "":
-        raise BookImportException(f"{filefielddata.filename} is empty.")
-    return content
+        messages = {
+            ".pdf": """
+            Note: pdf imports can be inaccurate, due to how PDFs are encoded.
+            Please be aware of this while reading.
+            """
+        }
+        msg = messages.get(ext)
+        if msg is not None:
+            flash(msg, "notice")
 
+        handlers = {
+            ".txt": self._get_textfile_content,
+            ".epub": self._get_epub_content,
+            ".pdf": self._get_pdf_content,
+            ".srt": self._get_srt_content,
+            ".vtt": self._get_vtt_content,
+        }
+        handler = handlers.get(ext)
+        if handler is None:
+            raise ValueError(f'Unknown file extension "{ext}"')
+        content = handler(filename, filestream).strip()
+        if content == "":
+            raise BookImportException(f"{filename} is empty.")
+        return content
 
-def get_textfile_content(filefielddata):
-    "Get content as a single string."
-    content = ""
-    try:
-        content = filefielddata.read()
-        return str(content, "utf-8")
-    except UnicodeDecodeError as e:
-        f = filefielddata.filename
-        msg = f"{f} is not utf-8 encoding, please convert it to utf-8 first (error: {str(e)})"
-        raise BookImportException(message=msg, cause=e) from e
+    def _get_text_stream_content(self, fstream, encoding="utf-8"):
+        "Gets content from simple text stream."
 
+        usestream = fstream
+        # May have to convert the fstream to a a BytesIO stream.
+        # GitHub CI caught this, and per ChatGPT: In Python 3.10,
+        # SpooledTemporaryFile no longer automatically gains all
+        # file-like methods when rolled over to a regular temporary
+        # file. Specifically, it seems that the object lacks the
+        # readable method required by TextIOWrapper to validate the
+        # stream ...
+        #
+        # I haven't looked into this deeply, but when running Python
+        # 3.10.16 on my mac, "inv accept -k bad_text_files" failed on
+        # line "with TextIOWrapper(fstream, encoding=encoding) as
+        # decoded:" with "AttributeError: 'SpooledTemporaryFile'
+        # object has no attribute 'readable'. Did you mean:
+        # 'readline'?"..  Converting usestream to BytesIO fixed it.
+        if not hasattr(fstream, "readable"):
+            usestream = BytesIO(fstream.read())  # Wrap in BytesIO if needed
+        with TextIOWrapper(usestream, encoding=encoding) as decoded:
+            return decoded.read()
 
-def get_epub_content(epub_file_field_data):
-    """
-    Get the content of the epub as a single string.
-    """
-    content = ""
-    try:
-        if hasattr(epub_file_field_data.stream, "seekable"):
-            epub = Epub(stream=epub_file_field_data.stream)
-            content = epub.get_text()
-        else:
-            # We get a SpooledTemporaryFile from the form but this doesn't
-            # implement all file-like methods until python 3.11. So we need
-            # to rewrite it into a TemporaryFile
-            with TemporaryFile() as tf:
-                epub_file_field_data.stream.seek(0)
-                tf.write(epub_file_field_data.stream.read())
-                epub = Epub(stream=tf)
+    def _get_textfile_content(self, filename, filestream):
+        "Get content as a single string."
+        try:
+            return self._get_text_stream_content(filestream)
+        except UnicodeDecodeError as e:
+            f = filename
+            msg = f"{f} is not utf-8 encoding, please convert it to utf-8 first (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
+
+    def _get_epub_content(self, filename, filestream):
+        """
+        Get the content of the epub as a single string.
+        """
+        content = ""
+        try:
+            if hasattr(filestream, "seekable"):
+                epub = Epub(stream=filestream)
                 content = epub.get_text()
-    except EpubError as e:
-        msg = f"Could not parse {epub_file_field_data.filename} (error: {str(e)})"
-        raise BookImportException(message=msg, cause=e) from e
-    return content
-
-
-def get_pdf_content_from_form(pdf_file_field_data):
-    "Get content as a single string from a PDF file using PyPDF2."
-    content = ""
-    try:
-        pdf_reader = PdfReader(pdf_file_field_data)
-
-        for page in pdf_reader.pages:
-            content += page.extract_text()
-
+            else:
+                # We get a SpooledTemporaryFile from the form but this doesn't
+                # implement all file-like methods until python 3.11. So we need
+                # to rewrite it into a TemporaryFile
+                with TemporaryFile() as tf:
+                    filestream.seek(0)
+                    tf.write(filestream.read())
+                    epub = Epub(stream=tf)
+                    content = epub.get_text()
+        except EpubError as e:
+            msg = f"Could not parse {filename} (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
         return content
-    except Exception as e:
-        msg = f"Could not parse {pdf_file_field_data.filename} (error: {str(e)})"
-        raise BookImportException(message=msg, cause=e) from e
+
+    def _get_pdf_content(self, filename, filestream):
+        "Get content as a single string from a PDF file using PyPDF2."
+        content = ""
+        try:
+            pdf_reader = PdfReader(filestream)
+            for page in pdf_reader.pages:
+                content += page.extract_text()
+            return content
+        except Exception as e:
+            msg = f"Could not parse {filename} (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
+
+    def _get_srt_content(self, filename, filestream):
+        """
+        Get the content of the srt as a single string.
+        """
+        content = ""
+        try:
+            srt_content = self._get_text_stream_content(filestream, "utf-8-sig")
+            parser = SrtParser(StringIO(srt_content))
+            parser.parse()
+            content = "\n".join(subtitle.text for subtitle in parser.subtitles)
+            return content
+        except Exception as e:
+            msg = f"Could not parse {filename} (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
+
+    def _get_vtt_content(self, filename, filestream):
+        """
+        Get the content of the vtt as a single string.
+        """
+        content = ""
+        try:
+            vtt_content = self._get_text_stream_content(filestream, "utf-8-sig")
+            # Check if it is from YouTube
+            lines = vtt_content.split("\n")
+            if lines[1].startswith("Kind:") and lines[2].startswith("Language:"):
+                vtt_content = "\n".join(lines[:1] + lines[3:])
+            parser = WebVttParser(StringIO(vtt_content))
+            parser.parse()
+            content = "\n".join(subtitle.text for subtitle in parser.subtitles)
+            return content
+        except Exception as e:
+            msg = f"Could not parse {filename} (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
 
 
-def get_srt_content(srt_file_field_data):
-    """
-    Get the content of the srt as a single string.
-    """
-    content = ""
-    try:
-        srt_content = srt_file_field_data.read().decode("utf-8-sig")
+class Service:
+    "Service."
 
-        parser = SrtParser(StringIO(srt_content))
-        parser.parse()
+    def _unique_fname(self, filename):
+        """
+        Return secure name pre-pended with datetime string.
+        """
+        current_datetime = datetime.now()
+        formatted_datetime = current_datetime.strftime("%Y%m%d_%H%M%S")
+        _, ext = os.path.splitext(filename)
+        ext = (ext or "").lower()
+        newfilename = uuid.uuid4().hex
+        return f"{formatted_datetime}_{newfilename}{ext}"
 
-        content = "\n".join(subtitle.text for subtitle in parser.subtitles)
+    def save_audio_file(self, audio_file_field_data):
+        """
+        Save the file to disk, return its filename.
+        """
+        filename = self._unique_fname(audio_file_field_data.filename)
+        fp = os.path.join(current_app.env_config.useraudiopath, filename)
+        audio_file_field_data.save(fp)
+        return filename
 
-        return content
-    except Exception as e:
-        msg = f"Could not parse {srt_file_field_data.filename} (error: {str(e)})"
-        raise BookImportException(message=msg, cause=e) from e
+    def book_data_from_url(self, url):
+        """
+        Parse the url and load source data for a new Book.
+        This returns a domain object, as the book is still unparsed.
+        """
+        s = None
+        try:
+            timeout = 20  # seconds
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            s = response.text
+        except requests.exceptions.RequestException as e:
+            msg = f"Could not parse {url} (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
 
+        soup = BeautifulSoup(s, "html.parser")
+        extracted_text = []
 
-def get_vtt_content(vtt_file_field_data):
-    """
-    Get the content of the vtt as a single string.
-    """
-    content = ""
-    try:
-        vtt_content = vtt_file_field_data.read().decode("utf-8-sig")
+        # Add elements in order found.
+        for element in soup.descendants:
+            if element.name in ("h1", "h2", "h3", "h4", "p"):
+                extracted_text.append(element.text)
 
-        # Check if it is from YouTube
-        lines = vtt_content.split("\n")
-        if lines[1].startswith("Kind:") and lines[2].startswith("Language:"):
-            vtt_content = "\n".join(lines[:1] + lines[3:])
+        title_node = soup.find("title")
+        orig_title = title_node.string if title_node else url
 
-        parser = WebVttParser(StringIO(vtt_content))
-        parser.parse()
+        short_title = orig_title[:150]
+        if len(orig_title) > 150:
+            short_title += " ..."
 
-        content = "\n".join(subtitle.text for subtitle in parser.subtitles)
+        b = BookDataFromUrl()
+        b.title = short_title
+        b.source_uri = url
+        b.text = "\n\n".join(extracted_text)
+        return b
 
-        return content
-    except Exception as e:
-        msg = f"Could not parse {vtt_file_field_data.filename} (error: {str(e)})"
-        raise BookImportException(message=msg, cause=e) from e
+    def import_book(self, book, session):
+        """
+        Save the book as a dbbook, parsing and saving files as needed.
+        Returns new book created.
+        """
 
+        def _raise_if_file_missing(p, fldname):
+            if not os.path.exists(p):
+                raise BookImportException(f"Missing file {p} given in {fldname}")
 
-def book_from_url(url):
-    "Parse the url and load a new Book."
-    s = None
-    try:
-        timeout = 20  # seconds
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        s = response.text
-    except requests.exceptions.RequestException as e:
-        msg = f"Could not parse {url} (error: {str(e)})"
-        raise BookImportException(message=msg, cause=e) from e
+        def _raise_if_none(p, fldname):
+            if p is None:
+                raise BookImportException(f"Must set {fldname}")
 
-    soup = BeautifulSoup(s, "html.parser")
-    extracted_text = []
+        fte = FileTextExtraction()
+        if book.text_source_path:
+            _raise_if_file_missing(book.text_source_path, "text_source_path")
+            tsp = book.text_source_path
+            with open(tsp, mode="rb") as stream:
+                book.text = fte.get_file_content(tsp, stream)
 
-    # Add elements in order found.
-    for element in soup.descendants:
-        if element.name in ("h1", "h2", "h3", "h4", "p"):
-            extracted_text.append(element.text)
+        if book.text_stream:
+            _raise_if_none(book.text_stream_filename, "text_stream_filename")
+            book.text = fte.get_file_content(
+                book.text_stream_filename, book.text_stream
+            )
 
-    title_node = soup.find("title")
-    orig_title = title_node.string if title_node else url
+        if book.audio_source_path:
+            _raise_if_file_missing(book.audio_source_path, "audio_source_path")
+            newname = self._unique_fname(book.audio_source_path)
+            fp = os.path.join(current_app.env_config.useraudiopath, newname)
+            shutil.copy(book.audio_source_path, fp)
+            book.audio_filename = newname
 
-    short_title = orig_title[:150]
-    if len(orig_title) > 150:
-        short_title += " ..."
+        if book.audio_stream:
+            _raise_if_none(book.audio_stream_filename, "audio_stream_filename")
+            newname = self._unique_fname(book.audio_stream_filename)
+            fp = os.path.join(current_app.env_config.useraudiopath, newname)
+            with open(fp, mode="wb") as fcopy:  # Use "wb" to write in binary mode
+                while chunk := book.audio_stream.read(
+                    8192
+                ):  # Read the stream in chunks (e.g., 8 KB)
+                    fcopy.write(chunk)
+            book.audio_filename = newname
 
-    b = Book()
-    b.title = short_title
-    b.source_uri = url
-    b.text = "\n\n".join(extracted_text)
-    return b
+        repo = Repository(session)
+        dbbook = repo.add(book)
+        repo.commit()
+        return dbbook

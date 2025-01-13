@@ -89,6 +89,22 @@
     {% for f in [
     form.open_popup_in_new_tab,
     form.stop_audio_on_term_form_open,
+    form.stats_calc_sample_size,
+    ]%}
+    <tr>
+      <td>{{ f.label }}</td>
+      <td>{{ f(class="form-control") }}</td>
+    </tr>
+    {% endfor %}
+
+    <tr>
+      <td>
+        <h2>Term Popups</h2>
+      </td>
+    </tr>
+    {% for f in [
+    form.term_popup_promote_parent_translation,
+    form.term_popup_show_components,
     ]%}
     <tr>
       <td>{{ f.label }}</td>

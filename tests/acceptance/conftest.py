@@ -27,6 +27,7 @@ def pytest_addoption(parser):
     """
     parser.addoption("--port", action="store", type=int, help="Specify the port number")
     parser.addoption("--headless", action="store_true", help="Run the test as headless")
+    parser.addoption("--mobile", action="store_true", help="Run tests tagged @mobile")
 
 
 @pytest.fixture(name="_environment_check", scope="session")
@@ -104,6 +105,21 @@ def session_chrome_browser(request, _environment_check):
         #   how-can-i-set-the-browser-window-size-when-using-google-chrome-headless
         chrome_options.add_argument("window-size=1920,1080")
 
+    mobile = request.config.getoption("--mobile")
+    if mobile:
+        useragent = [
+            "Mozilla/5.0 (Linux; Android 4.2.1; en-us; Nexus 5 Build/JOP40D)",
+            "AppleWebKit/535.19 (KHTML, like Gecko)",
+            "Chrome/18.0.1025.166 Mobile Safari/535.19",
+        ]
+        mobile_emulation = {
+            "deviceMetrics": {"width": 375, "height": 812, "pixelRatio": 3.0},
+            "userAgent": " ".join(useragent),
+        }
+        chrome_options.add_experimental_option("mobileEmulation", mobile_emulation)
+
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+
     # Initialize the browser with ChromeOptions
     browser = Browser("chrome", options=chrome_options)
 
@@ -138,6 +154,11 @@ def fixture_restore_jp_parser(luteclient):
 ## STEP DEFS
 
 
+@given("terminate the test")
+def terminate_test():
+    raise RuntimeError("Test terminated intentionally :wave:")
+
+
 # Setup
 
 
@@ -165,6 +186,12 @@ def disable_japanese_parser(luteclient, _restore_jp_parser):
 @given('I enable the "japanese" parser')
 def enable_jp_parser(luteclient):
     luteclient.change_parser_registry_key("disabled_japanese", "japanese")
+
+
+@given("all page start dates are set to null")
+def set_txstartdate_to_null(luteclient):
+    "Hack data."
+    luteclient.set_txstartdate_to_null()
 
 
 # Browsing
@@ -205,8 +232,11 @@ def given_demo_langs_loaded(luteclient):
 def given_demo_stories_loaded(luteclient):
     "Load the demo stories."
     luteclient.load_demo_stories()
+    _sleep(1)  # Hack!
     luteclient.visit("/")
+    _sleep(1)  # Hack!
     luteclient.clear_book_filter()
+    _sleep(0.5)  # Hack!
 
 
 @given("I clear the book filter")
@@ -239,12 +269,14 @@ def given_book_from_file(luteclient, lang, title, filename):
     thisdir = os.path.dirname(os.path.realpath(__file__))
     fullpath = os.path.join(thisdir, "sample_files", filename)
     luteclient.make_book_from_file(title, fullpath, lang)
+    _sleep(1)  # Hack!
 
 
 @given(parsers.parse("a {lang} book from url {url}"))
 def given_book_from_url(luteclient, lang, url):
     "Book is made from url in dev_api."
     luteclient.make_book_from_url(url, lang)
+    _sleep(1)  # Hack!
 
 
 @given(parsers.parse('the book table loads "{title}"'))
@@ -267,6 +299,16 @@ def check_book_table(luteclient, content):
     "Check the table, e.g. content like 'Hola; Spanish; ; 4 (0%);'"
     time.sleep(1)
     assert content == luteclient.get_book_table_content()
+
+
+@then(parsers.parse("book pages with start dates are:\n{content}"))
+def book_page_start_dates_are(luteclient, content):
+    assert content == luteclient.get_book_page_start_dates()
+
+
+@then(parsers.parse("book pages with read dates are:\n{content}"))
+def book_page_read_dates_are(luteclient, content):
+    assert content == luteclient.get_book_page_read_dates()
 
 
 # Terms
@@ -328,8 +370,17 @@ def check_exported_file(luteclient, content):
 @then(parsers.parse("the reading pane shows:\n{content}"))
 def then_read_content(luteclient, content):
     "Check rendered content."
+    c = content.replace("\n", "/")
+    timeout = 3  # seconds
+    poll_frequency = 0.25
+    start_time = time.time()
     displayed = luteclient.displayed_text()
-    assert content.replace("\n", "/") == displayed
+    while time.time() - start_time < timeout:
+        if c == displayed:
+            break
+        time.sleep(poll_frequency)
+    else:
+        assert c == displayed
 
 
 @when(parsers.parse("I change the current text content to:\n{content}"))
@@ -373,9 +424,17 @@ def when_go_to_page(luteclient, position):
         linkid = "navPrev"
     b = luteclient.browser
     b.find_by_id(linkid).first.click()
-    time.sleep(0.1)  # Assume this is necessary for ajax reload.
+    time.sleep(0.5)  # Assume this is necessary for ajax reload.
     # Don't reload, as it seems to nullify the nav click.
     # b.reload()
+
+
+@given(parsers.parse("I peek at page {pagenum}"))
+def given_peek_at_page(luteclient, pagenum):
+    "Peek at a page of the current book."
+    currurl = luteclient.browser.url
+    peekurl = re.sub(r"/page/.*", f"/peek/{pagenum}", currurl)
+    luteclient.browser.visit(peekurl)
 
 
 @when(parsers.parse("I delete the current page"))
@@ -401,6 +460,13 @@ def when_click_word_edit_form(luteclient, word, content):
     luteclient.click_word_fill_form(word, updates)
 
 
+@when(parsers.parse("I edit the bulk edit form:\n{content}"))
+def when_post_bulk_edits_while_reading(luteclient, content):
+    "The content is assumed to be yaml."
+    updates = yaml.safe_load(content)
+    luteclient.fill_reading_bulk_edit_form(updates)
+
+
 @then(parsers.parse('the reading page term form frame contains "{text}"'))
 def then_reading_page_term_form_iframe_contains(luteclient, text):
     "Have to get and read the iframe content, it's not in the main browser page."
@@ -417,11 +483,49 @@ def when_click_word(luteclient, word):
     luteclient.click_word(word)
 
 
+@then(parsers.parse('the reading page term form shows term "{text}"'))
+def then_reading_page_term_form_iframe_shows_term(luteclient, text):
+    "Have to get and read the iframe content, it's not in the main browser page."
+    with luteclient.browser.get_iframe("wordframe") as iframe:
+        time.sleep(0.4)  # Hack, test failing.
+        term_field = iframe.find_by_css("#text").first
+        zws = "\u200B"
+        val = term_field.value.replace(zws, "")
+        assert val == text, "check field value"
+
+
+@then("the bulk edit term form is shown")
+def then_reading_page_bulk_edit_term_form_is_shown(luteclient):
+    "Check content."
+    then_reading_page_term_form_iframe_contains(luteclient, "Updating")
+
+
+@then("the term form is hidden")
+def then_reading_page_term_form_is_hidden(luteclient):
+    "Set to blankn"
+    iframe_element = luteclient.browser.find_by_id("wordframeid").first
+    iframe_src = iframe_element["src"]
+    blanks = ["about:blank", "http://localhost:5001/read/empty"]
+    assert iframe_src in blanks, "Is blank"
+
+
 @when(parsers.parse("I shift click:\n{words}"))
 def shift_click_terms(luteclient, words):
     "Shift-click"
     words = words.split("\n")
     luteclient.shift_click_words(words)
+
+
+@when(parsers.parse('I shift-drag from "{wstart}" to "{wend}"'))
+def shift_drag(luteclient, wstart, wend):
+    "shift-drag highlights multiple words, copies to clipboard."
+    luteclient.shift_drag(wstart, wend)
+
+
+@when(parsers.parse('I drag from "{wstart}" to "{wend}"'))
+def drag(luteclient, wstart, wend):
+    "shift-drag highlights multiple words, copies to clipboard."
+    luteclient.drag(wstart, wend)
 
 
 @when(parsers.parse('I click "{word}" and press hotkey "{hotkey}"'))
@@ -441,8 +545,14 @@ def when_hover(luteclient, word):
 
 @when(parsers.parse('I press hotkey "{hotkey}"'))
 def when_press_hotkey(luteclient, hotkey):
-    "Click word and press hotkey."
+    "Press hotkey."
     luteclient.press_hotkey(hotkey)
+
+
+@given(parsers.parse('I set hotkey "{hotkey}" to "{value}"'))
+def given_set_hotkey(luteclient, hotkey, value):
+    "Set a hotkey to be X."
+    luteclient.hack_set_hotkey(hotkey, value)
 
 
 # Reading, paging
@@ -451,7 +561,7 @@ def when_press_hotkey(luteclient, hotkey):
 @when(parsers.parse("I click the footer green check"))
 def when_click_footer_check(luteclient):
     "Click footer."
-    luteclient.browser.find_by_id("footerMarkRestAsKnown").click()
+    luteclient.browser.find_by_id("footerMarkRestAsKnownNextPage").click()
     time.sleep(0.1)  # Leave this, remove and test fails.
 
 

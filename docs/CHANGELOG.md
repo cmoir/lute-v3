@@ -1,4 +1,236 @@
 
+# 3.9.2 (2025-01-09)
+
+* Issue #475: allow split by sentences or by paragraphs.
+* Issue #555: add page navigation hotkeys.
+
+Back end changes:
+
+* Refactor book creation, break dependency on http/forms
+
+
+# 3.9.1 (2025-01-07)
+
+* Fix mobile javascript bug
+* Add ci for checking mobile
+
+
+# 3.9.0 (2025-01-04)
+
+Feature changes:
+
+* Add black and white theme.  By @Christhomas17 in #557.
+* #543: track starting reading of each page, show in book listing.
+* #530: add 'peek' route to display page without tracking it, use for sentence lookups.
+
+
+# 3.8.1 (2024-12-26)
+
+Tweaks:
+
+* #547: add some basic "Term Popup" settings.
+
+Fixes:
+
+* #550: fix Bing sentence lookup.
+
+
+# 3.8.0 (2024-12-24)
+
+Tweaks:
+
+* #540: revise popup: include more data, but make layout more compact.
+* #541: change hotkeys to use "code" rather than "key letter pressed" so that people switching keyboard layouts can have constant shortcuts.
+* #544: allow showing "Unknown" Terms in filtered Term listing.
+* #527: Track words read in new wordsread table, allows for multiple re-reads of same page to be tracked in "words read" stats graph.
+
+Fixes:
+
+* #460: Set cascade delete database pragma on connect - ensures no orphaned data.
+* #546: fix Bing translation lookups, Bing can be embedded for Term and Sentence lookups.
+* Shift-drag copy shouldn't close form.
+
+
+# 3.7.0 (2024-12-20)
+
+Feature changes:
+
+* #537: add "bulk term actions" to reading screen and Term listing
+
+Fixes:
+
+* #328: apply existing term filters when reloading Term listing after editing Term
+* #531: term reference search should handle casing correctly.
+
+
+# 3.6.1 (2024-12-13)
+
+Feature changes:
+
+* Show term popup if term has tag.
+* #525: add Save Term customizable hotkey.
+* #517: show page fraction even if book completed.
+* #524: show popup for terms with data, ignoring status.
+* #522: allow term import with identical lines.
+* Update arabic language definition.
+
+Back end changes:
+
+* use pyproject.toml and flit only for managing dependencies
+* #534: change how Lute loads demo data for new installs
+
+
+# 3.6.0 (2024-11-15)
+
+Feature changes:
+
+* New khmer parser plugin (`lute3-khmer`).  By @jaydom28 in #513.
+* #302: change term/sentence translation placeholder from `###` to `[LUTE]`.
+* #302: `[LUTE]` placeholder not required, some dictionaries don't support extra arguments.
+
+Code changes:
+
+* #509: refactor all library code to use db.session argument
+
+
+# 3.5.9 (2024-11-02)
+
+Feature changes:
+
+* Add Thai plugin!  By @jaydom28 in #510.  Will be released to PyPi separately.
+* Add Thai definition and story, using the new Thai plugin.
+* #12: Allow bulk set status in Term listing.
+
+Tweaks:
+
+* #140: keyboard shortcuts to move to prev, next sentences.
+* #507: add `--local` startup flag to lute.main (disallows accessing from mobile devices)
+* Show 'text copied' message in tooltip only.
+* Only hold Shift down at start of text copy.
+
+Fixes:
+
+* #506: update stats if distribution is missing.
+* #114: allow / in multiword terms from reading screen.
+
+
+# 3.5.8 (2024-10-28)
+
+Tweaks:
+
+* #434: New hotkeys to move to prev/next unknown word.
+* #496: only propagate new child data to parent (saving an existing child doesn't re-update the parent)
+
+
+# 3.5.7 (2024-10-21)
+
+Feature changes:
+
+* #141: allow customized shortcuts
+* #495: add new shortcuts: translate page, edit page, copy page text, add bookmark, delete term
+
+Tweaks:
+
+* #497: Change default port to 5001.
+* #500: show  popup for ignored terms with data
+* Add version to startup console.
+
+
+# 3.5.6 (2024-10-13)
+
+Feature changes:
+
+* Add CLI tool to bulk import books from a CSV file.  See [the manual](https://luteorg.github.io/lute-manual/usage/command-line-jobs.html) for notes.  By @bwkimmel in #491
+
+Tweaks:
+
+* #103: click parent term auto-saves child
+* #467: allow change of book audio file
+
+Misc code:
+
+* #492: split prod and dev requirements
+* #490: build docker images using source code, not pypi
+* Add template for language parser plugins
+
+
+# 3.5.5 (2024-10-06)
+
+Feature changes:
+
+* #405: add UserSetting for book stats sample size.
+
+There was a big refactor/rewrite of much of the book stats
+calculation code.  The calculation isn't instantaneous,
+but as the graphs are ajaxed in now, it should suffice.
+
+Tweaks:
+
+* Show term popup if parent is set.
+* Ajax in book stats on home page for speed.
+* Simplify datatables rendering.
+
+Fixes:
+
+* #487: Use term IDs for deletes.
+* #488: Handle Japanese "repeat" kanji character.
+
+
+# 3.5.4 (2024-10-06)
+
+Botched release: forgot to update `pyproject.toml`, process updated.
+
+
+# 3.5.3 (2024-09-20)
+
+Tweaks:
+
+* #324: convert pending term parent text to tag on save, if not a real tag yet.
+* #480: persist user book table settings.
+* #482: don't rearrange whole reading page when adding multiword term.
+
+Fixes:
+
+* #483: docker build always uses latest pypi lute.
+* #479: fix pyproject.toml start script reference.
+* Interpret IS_DOCKER flag correctly.
+* #474: fix missing component term error.
+
+
+# 3.5.2 (2024-08-26)
+
+Tweaks:
+
+* Issue #472: add parents to term export.
+* Fail import terms if too many or few fields in data.
+* Disable CSRF check for form posts.
+
+Fixes:
+
+* #454: ignore duplicate tag added to Term.
+* Show underline for links in error screen, was confusing.
+* Allow offline images upload, don't throw 500 error.
+* Revert PR #459 (cblanken/issue-379-dictionary-tab-autofocus).
+
+
+# 3.5.1 (2024-08-15)
+
+Tweaks:
+
+* Never cache main page, always recalc book stats as needed.
+* #466: strip whitespace from jinja comment.
+* #497: allow .m4a audio files.
+* #437: exclude unknown terms from language term counts.
+
+Bug fixes:
+
+* #455: handle TermTag associations when tags are deleted.
+* #465: term import fix, only change statuses if explicitly specified.
+* #458: omit empty error messages on language save.
+* #464: prevent dictionary tabs from stealing focus.  By @cblanken in #459.
+* #293: fix stats chart shrinking.  By @cblanken in #456.
+
+
 # 3.5.0 (2024-06-12)
 
 Feature changes:

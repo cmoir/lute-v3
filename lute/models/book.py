@@ -2,8 +2,9 @@
 Book entity.
 """
 
+import sqlite3
+from contextlib import closing
 from lute.db import db
-from lute.parse.base import SentenceGroupIterator
 
 booktags = db.Table(
     "booktags",
@@ -28,19 +29,6 @@ class BookTag(db.Model):
         tt.text = text
         tt.comment = comment
         return tt
-
-    @staticmethod
-    def find_by_text(text):
-        "Find a tag by text, or None if not found."
-        return db.session.query(BookTag).filter(BookTag.text == text).first()
-
-    @staticmethod
-    def find_or_create_by_text(text):
-        "Return tag or create one."
-        ret = BookTag.find_by_text(text)
-        if ret is not None:
-            return ret
-        return BookTag.make_book_tag(text)
 
 
 class Book(
@@ -150,54 +138,6 @@ class Book(
         "True if the book's language's parser is supported."
         return self.language.is_supported
 
-    @staticmethod
-    def create_book(title, language, fulltext, max_word_tokens_per_text=250):
-        """
-        Create a book with given fulltext content,
-        splitting the content into separate Text objects with max
-        token count.
-        """
-
-        def split_text_at_page_breaks(txt):
-            "Break fulltext manually at lines consisting of '---' only."
-            # Tried doing this with a regex without success.
-            segments = []
-            current_segment = ""
-            for line in txt.split("\n"):
-                if line.strip() == "---":
-                    segments.append(current_segment.strip())
-                    current_segment = ""
-                else:
-                    current_segment += line + "\n"
-            if current_segment:
-                segments.append(current_segment.strip())
-            return segments
-
-        pages = []
-        for segment in split_text_at_page_breaks(fulltext):
-            tokens = language.parser.get_parsed_tokens(segment, language)
-            it = SentenceGroupIterator(tokens, max_word_tokens_per_text)
-            while toks := it.next():
-                s = (
-                    "".join([t.token for t in toks])
-                    .replace("\r", "")
-                    .replace("¶", "\n")
-                    .strip()
-                )
-                pages.append(s)
-        pages = [p for p in pages if p.strip() != ""]
-
-        b = Book(title, language)
-        for index, page in enumerate(pages):
-            t = Text(b, page, index + 1)
-
-        return b
-
-    @staticmethod
-    def find(book_id):
-        "Get by ID."
-        return db.session.query(Book).filter(Book.id == book_id).first()
-
 
 # TODO zzfuture fix: rename class and table to Page/pages
 class Text(db.Model):
@@ -210,6 +150,7 @@ class Text(db.Model):
     id = db.Column("TxID", db.Integer, primary_key=True)
     _text = db.Column("TxText", db.String, nullable=False)
     order = db.Column("TxOrder", db.Integer)
+    start_date = db.Column("TxStartDate", db.DateTime, nullable=True)
     _read_date = db.Column("TxReadDate", db.DateTime, nullable=True)
     bk_id = db.Column("TxBkID", db.Integer, db.ForeignKey("books.BkID"), nullable=False)
     word_count = db.Column("TxWordCount", db.Integer, nullable=True)
@@ -275,22 +216,27 @@ class Text(db.Model):
 
     def _load_sentences_from_tokens(self, parsedtokens):
         "Save sentences using the tokens."
+        parser = self.book.language.parser
         self._remove_sentences()
         curr_sentence_tokens = []
-        sentence_number = 1
+        sentence_num = 1
+
+        def _add_current():
+            "Create and add sentence from current state."
+            if curr_sentence_tokens:
+                se = Sentence.from_tokens(curr_sentence_tokens, parser, sentence_num)
+                self._add_sentence(se)
+            # Reset for the next sentence.
+            curr_sentence_tokens.clear()
+
         for pt in parsedtokens:
             curr_sentence_tokens.append(pt)
             if pt.is_end_of_sentence:
-                se = Sentence.from_tokens(curr_sentence_tokens, sentence_number)
-                self._add_sentence(se)
-                # Reset for the next sentence.
-                curr_sentence_tokens = []
-                sentence_number += 1
+                _add_current()
+                sentence_num += 1
 
         # Add any stragglers.
-        if len(curr_sentence_tokens) > 0:
-            se = Sentence.from_tokens(curr_sentence_tokens, sentence_number)
-            self._add_sentence(se)
+        _add_current()
 
     def load_sentences(self):
         """
@@ -311,10 +257,31 @@ class Text(db.Model):
             sentence.text = None
         self.sentences = []
 
-    @staticmethod
-    def find(text_id):
-        "Get by ID."
-        return db.session.query(Text).filter(Text.id == text_id).first()
+
+class WordsRead(db.Model):
+    """
+    Tracks reading events for Text entities.
+    """
+
+    __tablename__ = "wordsread"
+    id = db.Column("WrID", db.Integer, primary_key=True)
+    language_id = db.Column(
+        "WrLgID", db.Integer, db.ForeignKey("languages.LgID"), nullable=False
+    )
+    tx_id = db.Column(
+        "WrTxID",
+        db.Integer,
+        db.ForeignKey("texts.TxID", ondelete="SET NULL"),
+        nullable=True,
+    )
+    read_date = db.Column("WrReadDate", db.DateTime, nullable=False)
+    word_count = db.Column("WrWordCount", db.Integer, nullable=False)
+
+    def __init__(self, text, read_date, word_count):
+        self.tx_id = text.id
+        self.language_id = text.book.language.id
+        self.read_date = read_date
+        self.word_count = word_count
 
 
 class Sentence(db.Model):
@@ -330,34 +297,57 @@ class Sentence(db.Model):
     tx_id = db.Column("SeTxID", db.Integer, db.ForeignKey("texts.TxID"), nullable=False)
     order = db.Column("SeOrder", db.Integer, default=1)
     text_content = db.Column("SeText", db.Text, default="")
+    textlc_content = db.Column("SeTextLC", db.Text)
 
     text = db.relationship("Text", back_populates="sentences")
 
-    def __init__(self, text_content="", text=None, order=1):
-        self.text_content = text_content
-        self.text = text
-        self.order = order
+    def set_lowercase_text(self, parser):
+        """
+        Load textlc_content from text_content.
+
+        If a call to sqlite's LOWER() function for the text_content
+        returns the same lowercase text as a call to the parser,
+        store '*' as the lowercase text.  This seeming hack can save a
+        pile of space: for my ~30meg db of ~135K sentences, only 750
+        sentences were different when lowercased by the LOWER() vs by
+        the parser.
+
+        This method is public for use in the data_cleanup module.
+        """
+
+        def _get_sql_lower(input_string):
+            "Returns result of sqlite LOWER call of input_string."
+            if input_string is None:
+                return None
+            with sqlite3.connect(":memory:") as conn, closing(conn.cursor()) as cur:
+                cur.execute("SELECT LOWER(?)", (input_string,))
+                result = cur.fetchone()
+                return result[0]
+
+        lcased = parser.get_lowercase(self.text_content)
+        if lcased == _get_sql_lower(self.text_content):
+            lcased = "*"
+        self.textlc_content = lcased
 
     @staticmethod
-    def from_tokens(tokens, senumber):
+    def from_tokens(tokens, parser, senumber):
         """
         Create a new Sentence from ParsedTokens.
         """
 
-        ptstrings = [t.token for t in tokens]
-
-        zws = chr(0x200B)  # Zero-width space.
-        s = zws.join(ptstrings)
-        s = s.strip(" ")
-
-        # The zws is added at the start and end of each
-        # sentence, to standardize the string search when
-        # looking for terms.
-        s = zws + s + zws
+        def _sentence_string(string_array):
+            "Create properly-zws-joined sentence string."
+            zws = chr(0x200B)  # Zero-width space.
+            s = zws.join(string_array).strip(" ")
+            # The zws is added at the start and end of each
+            # sentence, to standardize the string search when
+            # looking for terms.
+            return zws + s + zws
 
         sentence = Sentence()
         sentence.order = senumber
-        sentence.text_content = s
+        sentence.text_content = _sentence_string([t.token for t in tokens])
+        sentence.set_lowercase_text(parser)
         return sentence
 
 
@@ -380,3 +370,14 @@ class TextBookmark(db.Model):
     title = db.Column("TbTitle", db.Text, nullable=False)
 
     text = db.relationship("Text", back_populates="bookmarks")
+
+
+class BookStats(db.Model):
+    "The stats table."
+    __tablename__ = "bookstats"
+
+    BkID = db.Column(db.Integer, primary_key=True)
+    distinctterms = db.Column(db.Integer)
+    distinctunknowns = db.Column(db.Integer)
+    unknownpercent = db.Column(db.Integer)
+    status_distribution = db.Column(db.String, nullable=True)

@@ -15,21 +15,32 @@ invoke --help <cmd>    # See docstrings and help notes
 import os
 import sys
 import subprocess
+import threading
+import time
 from datetime import datetime
 import requests
 from invoke import task, Collection
 from lute.config.app_config import AppConfig
 
+# pylint: disable=unused-argument
+
 
 @task
 def lint(c):
     "Run pylint on lute/ and tests/."
+    print("Starting lint")
     # Formats: https://pylint.pycqa.org/en/latest/user_guide/usage/output.html
     msgfmt = [
         "--ignore-patterns='zz_.*.py'",
         "--msg-template='{path} ({line:03d}): {msg} ({msg_id} {symbol})'",
     ]
     c.run(f"pylint {' '.join(msgfmt)} tasks.py lute/ tests/")
+
+
+@task
+def lint_changed(c):
+    "Run pylint on changed files only.  (*nix machines only)"
+    c.run("for p in `git diff --name-only | grep py`; do echo $p; pylint $p; done")
 
 
 @task
@@ -40,8 +51,8 @@ def todos(c):
     c.run("python utils/todos.py")
 
 
-@task(help={"port": "optional port to run on; default = 5000"})
-def start(c, port=5000):
+@task(help={"port": "optional port to run on; default = 5001"})
+def start(c, port=5001):
     """
     Start the dev server, using script dev.py.
     """
@@ -82,51 +93,89 @@ def test(c):
 
 
 def _site_is_running(useport=None):
-    """
-    Return true if site is running on port, or default 5000.
-    """
-    if useport is None:
-        useport = 5000
-
-    url = f"http://localhost:{useport}"
+    "Return True if running on port."
     try:
-        print(f"checking for site at {url} ...")
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(f"http://localhost:{useport}", timeout=5)
         if resp.status_code != 200:
             raise RuntimeError(f"Got code {resp.status_code} ... ???")
-        print("Site running, using that for tests.")
-        print()
         return True
     except requests.exceptions.ConnectionError:
-        print(f"URL {url} not reachable, will start new server at that port.")
-        print()
         return False
 
 
-@task(
-    pre=[_ensure_test_db],
-    help={
-        "port": "optional port to run on; creates server if needed.",
-        "show": "print data",
-        "noheadless": "run as non-headless (default is headless, i.e. not shown)",
-        "kflag": "optional -k flag argument",
-        "exitfirst": "exit on first failure",
-        "verbose": "make verbose",
-    },
-)
-def accept(  # pylint: disable=too-many-arguments
+def _wait_for_running_site(port):
+    "Wait until the site is running."
+    url = f"http://localhost:{port}"
+    is_running = False
+    attempt_count = 0
+    print(f"Wait until site is running at {url} ...", flush=True)
+    while attempt_count < 10 and not is_running:
+        attempt_count += 1
+        try:
+            # print(f"  Attempt {attempt_count}", flush=True)
+            requests.get(url, timeout=5)
+            print(f"Site is running (succeeded on attempt {attempt_count})", flush=True)
+            is_running = True
+        except requests.exceptions.ConnectionError:
+            time.sleep(1)
+    if not is_running:
+        raise Exception("Site didn't start?")  # pylint: disable=broad-exception-raised
+
+
+def _run_browser_tests(port, run_test):
+    "Start server on port, and run tests."
+    tests_failed = False
+    if _site_is_running(port):
+        raise RuntimeError(f"Site already running on port {port}, quitting")
+
+    def print_subproc_output(pipe, label):
+        """Prints output from a given pipe with a label."""
+        for line in iter(pipe.readline, b""):
+            print(f"[{label}] {line.decode().strip()}", flush=True)
+        pipe.close()
+
+    cmd = ["python", "-m", "tests.acceptance.start_acceptance_app", f"{port}"]
+    with subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    ) as app_process:
+        _wait_for_running_site(port)
+        stdout_thread = threading.Thread(
+            target=print_subproc_output, args=(app_process.stdout, "STDOUT")
+        )
+        stderr_thread = threading.Thread(
+            target=print_subproc_output, args=(app_process.stderr, "STDERR")
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            subprocess.run(run_test, check=True)
+        except subprocess.CalledProcessError:
+            # This just means a test failed.  We don't need to see
+            # a stack trace, the assert failures are already displayed.
+            tests_failed = True
+        finally:
+            app_process.terminate()
+            stdout_thread.join()
+            stderr_thread.join()
+
+    if tests_failed:
+        raise RuntimeError("tests failed")
+
+
+def _run_acceptance(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     c,
-    port=5000,
+    port=5001,
     show=False,
     noheadless=False,
     kflag=None,
+    mobile=False,
     exitfirst=False,
     verbose=False,
 ):
     """
     Start lute, run tests/acceptance tests, screenshot fails.
 
-    If no port specified, use default 5000.
+    If no port specified, use default 5001.
 
     If Lute's not running on specified port, start a server.
     """
@@ -149,24 +198,73 @@ def accept(  # pylint: disable=too-many-arguments
         run_test.append("--exitfirst")
     if verbose:
         run_test.append("-vv")
+    if mobile:
+        run_test.append("-m mobile")
+        run_test.append("--mobile")
 
-    tests_failed = False
-    if _site_is_running(port):
-        c.run(" ".join(run_test))
-    else:
-        cmd = ["python", "-m", "tests.acceptance.start_acceptance_app", f"{port}"]
-        with subprocess.Popen(cmd) as app_process:
-            try:
-                subprocess.run(run_test, check=True)
-            except subprocess.CalledProcessError:
-                # This just means a test failed.  We don't need to see
-                # a stack trace, the assert failures are already displayed.
-                tests_failed = True
-            finally:
-                app_process.terminate()
+    _run_browser_tests(5001, run_test)
 
-    if tests_failed:
-        raise RuntimeError("tests failed")
+
+acceptance_help = {
+    "port": "optional port to run on; creates server if needed.",
+    "show": "print data",
+    "noheadless": "run as non-headless (default is headless, i.e. not shown)",
+    "kflag": "optional -k flag argument",
+    "exitfirst": "exit on first failure",
+    "verbose": "make verbose",
+}
+
+
+@task(
+    pre=[_ensure_test_db],
+    help=acceptance_help,
+)
+def accept(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    c,
+    port=5001,
+    show=False,
+    noheadless=False,
+    kflag=None,
+    exitfirst=False,
+    verbose=False,
+):
+    "Run acceptance tests, full browser."
+    _run_acceptance(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        c,
+        port=port,
+        show=show,
+        noheadless=noheadless,
+        kflag=kflag,
+        mobile=False,
+        exitfirst=exitfirst,
+        verbose=verbose,
+    )
+
+
+@task(
+    pre=[_ensure_test_db],
+    help=acceptance_help,
+)
+def acceptmobile(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    c,
+    port=5001,
+    show=False,
+    noheadless=False,
+    kflag=None,
+    exitfirst=False,
+    verbose=False,
+):
+    "Run acceptance tests, mobile emulation, tests marked @mobile."
+    _run_acceptance(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        c,
+        port=port,
+        show=show,
+        noheadless=noheadless,
+        kflag=kflag,
+        mobile=True,
+        exitfirst=exitfirst,
+        verbose=verbose,
+    )
 
 
 @task(pre=[_ensure_test_db])
@@ -174,30 +272,12 @@ def playwright(c):
     """
     Start lute, run playwright tests.  export SHOW=true env var to run non-headless.
 
-    Only uses port 5000.
+    Only uses port 5001.
 
     If Lute's not running on specified port, start a server.
     """
     run_test = ["pytest", "tests/playwright/playwright.py", "-s"]
-
-    tests_failed = False
-    port = 5000
-    if _site_is_running(port):
-        c.run(" ".join(run_test))
-    else:
-        cmd = ["python", "-m", "tests.acceptance.start_acceptance_app", f"{port}"]
-        with subprocess.Popen(cmd) as app_process:
-            try:
-                subprocess.run(run_test, check=True)
-            except subprocess.CalledProcessError:
-                # This just means a test failed.  We don't need to see
-                # a stack trace, the assert failures are already displayed.
-                tests_failed = True
-            finally:
-                app_process.terminate()
-
-    if tests_failed:
-        raise RuntimeError("tests failed")
+    _run_browser_tests(5001, run_test)
 
 
 @task(pre=[_ensure_test_db], help={"html": "open html report"})
@@ -217,13 +297,13 @@ def coverage(c, html=False):
         c.run(cmd)
 
 
-@task(post=[lint])
+@task
 def black(c):
     "black-format things."
     c.run("python -m black .")
 
 
-@task(pre=[test, accept, playwright])
+@task(pre=[test, accept, acceptmobile, playwright])
 def fulltest(c):  # pylint: disable=unused-argument
     """
     Run full tests check.
@@ -243,8 +323,10 @@ ns = Collection()
 ns.add_task(fulltest)
 ns.add_task(full)
 ns.add_task(lint)
+ns.add_task(lint_changed)
 ns.add_task(test)
 ns.add_task(accept)
+ns.add_task(acceptmobile)
 ns.add_task(playwright)
 ns.add_task(coverage)
 ns.add_task(todos)
@@ -255,28 +337,6 @@ ns.add_task(black)
 
 ##############################
 # DB tasks
-
-
-@task(pre=[_ensure_test_db])
-def db_wipe(c):
-    """
-    Wipe the data from the testing db; factory reset settings. :-)
-
-    Can only be run on a testing db.
-    """
-    c.run("pytest -m dbwipe")
-    print("ok")
-
-
-@task(pre=[_ensure_test_db])
-def db_reset(c):
-    """
-    Reset the database to the demo data.
-
-    Can only be run on a testing db.
-    """
-    c.run("pytest -m dbdemoload")
-    print("ok")
 
 
 def _schema_dir():
@@ -314,24 +374,19 @@ def _do_schema_export(c, destfile, header_notes, taskname):
 @task
 def db_export_baseline(c):
     """
-    Reset the db, and create a new baseline db file from the current db.
+    Create a new baseline db file from the current db.
     """
-
-    # Running the delete task before this one as a pre- step was
-    # causing problems (sqlite file not in correct state), so this
-    # asks the user to verify.
-    text = input("Have you reset the db?  (y/n): ")
-    if text != "y":
-        print("quitting.")
-        return
     _do_schema_export(
-        c, "baseline.sql", "Baseline db with demo data.", "db.export.baseline"
+        c,
+        "baseline.sql",
+        "Baseline db with flag to load demo data.",
+        "db.export.baseline",
     )
 
     fname = os.path.join(_schema_dir(), "baseline.sql")
     print(f"Verifying {fname}")
     with open(fname, "r", encoding="utf-8") as f:
-        checkstring = "Tutorial follow-up"
+        checkstring = 'CREATE TABLE IF NOT EXISTS "languages"'
         if checkstring in f.read():
             print(f'"{checkstring}" found, likely ok.')
         else:
@@ -339,22 +394,15 @@ def db_export_baseline(c):
             raise RuntimeError(f'Missing "{checkstring}" in exported file.')
 
 
-@task
-def db_export_empty(c):
+@task(pre=[_ensure_test_db])
+def db_reset(c):
     """
-    Create a new empty db file from the current db.
+    Reset the database to baseline state for new installations, with LoadDemoData system flag set.
 
-    This assumes that the current db is in data/test_lute.db.
+    Can only be run on a testing db.
     """
-
-    # Running the delete task before this one as a pre- step was
-    # causing problems (sqlite file not in correct state), so this
-    # asks the user to verify.
-    text = input("Have you **WIPED** the db?  (y/n): ")
-    if text != "y":
-        print("quitting.")
-        return
-    _do_schema_export(c, "empty.sql", "EMPTY DB.", "db.export.empty")
+    c.run("pytest -m dbreset")
+    print("\nok, export baseline.sql if needed.\n")
 
 
 @task(help={"suffix": "suffix to add to filename."})
@@ -374,11 +422,9 @@ def db_newscript(c, suffix):  # pylint: disable=unused-argument
 
 dbtasks = Collection("db")
 dbtasks.add_task(db_reset, "reset")
-dbtasks.add_task(db_wipe, "wipe")
 dbtasks.add_task(db_newscript, "newscript")
 dbexport = Collection("export")
 dbexport.add_task(db_export_baseline, "baseline")
-dbexport.add_task(db_export_empty, "empty")
 dbtasks.add_collection(dbexport)
 
 ns.add_collection(dbtasks)

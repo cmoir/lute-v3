@@ -227,6 +227,7 @@ table#booktable:not(:has(a.completed_book)) a.book-title:before {
 
 .refreshed {
     background-image: url("../icn/waiting2.gif");
+    background-repeat: no-repeat;
 }
 
 .book-action-dropdown {
@@ -648,6 +649,11 @@ input[type=text].form-control-narrower {
     box-sizing: border-box;
 }
 
+.formfieldcomment {
+    font-size: 0.85em;
+    font-style: italic;
+}
+
 .nomarginblock {
     margin-block-start: 0px;
     margin-block-end: 0px;
@@ -729,7 +735,6 @@ span.textsentence {
 span.textitem {
     font-size: 16px;
     color: var(--font-color);
-    display:inline-block;
 
     /* disallow select, only allow mouse-down-drag-up to define multiword
    terms. */
@@ -1209,6 +1214,23 @@ table input:not([type="checkbox"]) {
     width: 20rem;
 }
 
+#shortcutstable th {
+    text-align: left;
+}
+
+#shortcutstable .settingcategory {
+    font-size: 1.2em;
+    font-weight: bold;
+}
+
+#shortcutstable input[type=text] {
+    max-width: 8rem;
+}
+
+.dupShortcut {
+    background-color: #FFCCCB;
+}
+
 #book td:first-child,
 #language td:first-child {
     width: 15rem;
@@ -1257,6 +1279,12 @@ div.help-text {
 }
 
 #term {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+#term-bulk-form-fields {
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
@@ -1766,6 +1794,12 @@ input[type="checkbox"][disabled] + label {
     background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" /></svg>');
 }
 
+input[name='status']:disabled + label {
+    color: grey; /* Make the label text grey */
+    cursor: not-allowed; /* Change cursor to indicate non-interactivity */
+    opacity: 0.6; /* Dim the appearance */
+}
+
 /* SETTINGS TABLE */
 #custom_styles {
     height: 100px;
@@ -1775,13 +1809,14 @@ input[type="checkbox"][disabled] + label {
 
 #current_theme, 
 #japanese_reading, 
-#backup_count, 
+#backup_count,
+#stats_calc_sample_size,
 #test_mecab_btn,
 #parser_type,
 #language_id,
 #txtSetParent,
 #predefined,
-#max_page_tokens,
+#threshold_page_tokens,
 #dict_tabs,
 .dict-type,
 .dict-usefor {
@@ -2034,6 +2069,10 @@ input[type="checkbox"][disabled] + label {
     padding-right: 1.5rem;
 }
 
+.book-stats-ajax-cell {
+    font-style: italic;
+}
+
 .status-bar-container-empty {
     border-color: #e6e6e6;
     background-color: #fff;
@@ -2094,11 +2133,20 @@ input[type="checkbox"][disabled] + label {
     display: flex;
 }
 
+/*
 .term-action-dropdown,
-#set_parent_div {
+.actionDiv {
     display: flex;
     align-items: center;
     margin-right: 10px;
+}
+*/
+
+#bulkEditDiv {
+    margin: 0.5rem;
+    padding: 1rem;
+    width: 50%;
+    border: 1px solid lightgrey;
 }
 
 /* The container <div> to position the dropdown content */
@@ -2175,6 +2223,10 @@ div#termimagesearch .saved {
 
 div#termimagesearch span > img {
     display:inline;
+}
+
+div#termimagesearch span.imageAction {
+    text-decoration: underline;
 }
 
 div#termimagesearch span.imageAction:hover {

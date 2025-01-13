@@ -2,15 +2,14 @@
 Show terms in datatables.
 """
 
-from lute.db import db
 from lute.utils.data_tables import DataTablesSqliteQuery, supported_parser_type_criteria
 
 
-def get_data_tables_list(parameters):
+def get_data_tables_list(parameters, session):
     "Term json data for datatables."
 
     base_sql = """SELECT
-    0 as chk, w.WoID as WoID, LgName, L.LgID as LgID, w.WoText as WoText, parents.parentlist as ParentText, w.WoTranslation,
+    w.WoID as WoID, LgName, L.LgID as LgID, w.WoText as WoText, parents.parentlist as ParentText, w.WoTranslation,
     w.WoRomanization,
     replace(wi.WiSource, '.jpeg', '') as WiSource,
     ifnull(tags.taglist, '') as TagList,
@@ -79,19 +78,17 @@ def get_data_tables_list(parameters):
     if age_max:
         wheres.append(f"{sql_age_calc} <= {int(age_max)}")
 
-    status_wheres = ["StID not in (0, 98)"]
-    status_min = int(parameters["filtStatusMin"])
-    status_max = int(parameters["filtStatusMax"])
-    if status_min > 0:
-        status_wheres.append(f"StID >= {status_min}")
-    if status_max > 0:
-        status_wheres.append(f"StID <= {status_max}")
-    status_wheres = " AND ".join(status_wheres)
+    st_range = ["StID != 98"]
+    status_min = int(parameters.get("filtStatusMin", "0"))
+    status_max = int(parameters.get("filtStatusMax", "99"))
+    st_range.append(f"StID >= {status_min}")
+    st_range.append(f"StID <= {status_max}")
+    st_where = " AND ".join(st_range)
     if parameters["filtIncludeIgnored"] == "true":
-        status_wheres = f"({status_wheres} OR StID = 98)"
-    wheres.append(status_wheres)
+        st_where = f"({st_where} OR StID = 98)"
+    wheres.append(st_where)
 
     # Phew.
     return DataTablesSqliteQuery.get_data(
-        base_sql + " WHERE " + " AND ".join(wheres), parameters, db.session.connection()
+        base_sql + " WHERE " + " AND ".join(wheres), parameters, session.connection()
     )

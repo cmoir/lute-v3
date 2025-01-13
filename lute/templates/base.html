@@ -28,6 +28,8 @@
   <link rel="stylesheet" type="text/css" href="/theme/current">
   <link rel="stylesheet" type="text/css" href="/theme/custom_styles">
 
+  {% block preloadassets %}{% endblock %}
+
   <script type="text/javascript" src="{{ url_for('static', filename='vendor/jquery/jquery.js') }}" charset="utf-8"></script>
   <script type="text/javascript" src="{{ url_for('static', filename='vendor/jquery/jquery.scrollTo.min.js') }}" charset="utf-8"></script>
   <script type="text/javascript" src="{{ url_for('static', filename='vendor/jquery/jquery-ui.min.js') }}"  charset="utf-8"></script>
@@ -38,11 +40,13 @@
   <script type="text/javascript" src="{{ url_for('static', filename='vendor/datatables/datatables.button.download.js') }}" charset="utf-8"></script>
   <script type="text/javascript" src="{{ url_for('static', filename='vendor/jquery/jquery.hoverIntent.js') }}" charset="utf-8"></script>
 
-  <!-- this calls a route defined in app_factory to never cache this file -->
+  <!-- the "never_cache" calls a route defined in app_factory to never cache that particular .js file -->
+  <script type="text/javascript" src="/static/js/never_cache/lute-hotkey-utils.js" charset="utf-8"></script>
   <script type="text/javascript" src="/static/js/never_cache/lute.js" charset="utf-8"></script>
 
   <script type="text/javascript">
     const LUTE_USER_SETTINGS = {{ user_settings | safe }}
+    const LUTE_USER_HOTKEYS = {{ user_hotkeys | safe }}
   </script>
 </head>
 <body>
@@ -98,6 +102,7 @@
         <ul class="sub-menu">
           <li><a id="lang_index" href="/language/index">Languages</a></li>
           <li><a href="/settings/index">Settings</a></li>
+          <li><a href="/settings/shortcuts">Keyboard shortcuts</a></li>
         </ul>
       </div>
       {% if backup_enabled and backup_directory != '' %}
